@@ -26,6 +26,7 @@ set(LIBRARY_VERSION "${LIBRARY_VERSION_MAJOR}.${LIBRARY_VERSION_MINOR}.${LIBRARY
 set(LIBRARY_SOVERSION ${LIBRARY_VERSION_MAJOR})
 
 option(BUILD_SHARED_LIBS "Build shared avif library" ON)
+set(CMAKE_STATIC_LIBRARY_SUFFIX "_a.lib")
 
 option(AVIF_ENABLE_WERROR "Treat all compiler warnings as errors" ON)
 
