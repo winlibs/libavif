@@ -26,7 +26,7 @@ jobs:
             gcc: 14
 
     steps:
-    - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
     - uses: ./.github/actions/setup-linux
       id: setup
       with:
@@ -63,7 +63,7 @@ jobs:
     # See https://docs.github.com/en/actions/using-workflows/storing-workflow-data-as-artifacts
     - name: Archive golden tests output for debugging
       if: failure()
-      uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
+      uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
       with:
         name: golden-tests-output
         path: ${{ runner.temp }}/golden_tests/**/*
