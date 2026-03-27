@@ -16,30 +16,7 @@
 #
 # tests for command lines (grid)
 
-# Very verbose but useful for debugging.
-set -ex
-
-if [[ "$#" -ge 1 ]]; then
-  # eval so that the passed in directory can contain variables.
-  BINARY_DIR="$(eval echo "$1")"
-else
-  # Assume "tests" is the current directory.
-  BINARY_DIR="$(pwd)/.."
-fi
-if [[ "$#" -ge 2 ]]; then
-  TESTDATA_DIR="$(eval echo "$2")"
-else
-  TESTDATA_DIR="$(pwd)/data"
-fi
-if [[ "$#" -ge 3 ]]; then
-  TMP_DIR="$(eval echo "$3")"
-else
-  TMP_DIR="$(mktemp -d)"
-fi
-
-AVIFENC="${BINARY_DIR}/avifenc"
-AVIFDEC="${BINARY_DIR}/avifdec"
-ARE_IMAGES_EQUAL="${BINARY_DIR}/tests/are_images_equal"
+source $(dirname "$0")/cmd_test_common.sh || exit
 
 # Input file paths.
 INPUT_PNG="${TESTDATA_DIR}/paris_icc_exif_xmp.png" # 403 x 302 px
@@ -66,8 +43,14 @@ pushd ${TMP_DIR}
   "${AVIFENC}" -s 8 "${INPUT_PNG}" --grid 2x2 -o "${ENCODED_FILE_2x2}"
   "${AVIFDEC}" "${ENCODED_FILE_2x2}" "${DECODED_FILE_2x2}"
 
+  echo "Testing grid metadata"
+  "${AVIFDEC}" --info "${ENCODED_FILE_2x2}" > "${ENCODED_FILE_2x2}.info.txt"
+  grep "ICC Profile    : Present" "${ENCODED_FILE_2x2}.info.txt"
+  grep "XMP Metadata   : Present" "${ENCODED_FILE_2x2}.info.txt"
+  grep "Exif Metadata  : Present" "${ENCODED_FILE_2x2}.info.txt"
+
   echo "Testing monochrome grid with odd width (403 px)"
-  "${AVIFENC}" -s 8 "${INPUT_PNG}" --grid 2x2 --yuv 400 -o "${ENCODED_FILE_2x2}"
+  "${AVIFENC}" -s 8 "${INPUT_PNG}" --grid 2x2 --yuv 400 --ignore-icc -o "${ENCODED_FILE_2x2}"
   "${AVIFDEC}" "${ENCODED_FILE_2x2}" "${DECODED_FILE_2x2}"
 
   echo "Testing max grid"

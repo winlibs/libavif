@@ -11,10 +11,12 @@
 namespace avif {
 
 TonemapCommand::TonemapCommand()
-    : ProgramCommand("tonemap",
-                     "Tone maps an avif image that has a gain map to a "
-                     "given HDR headroom (how much brighter the display can go "
-                     "compared to an SDR display)") {
+    : ProgramCommand(
+          "tonemap",
+          "Tone map an AVIF image that has a gain map to a given HDR headroom "
+          "(how much brighter the display can go compared to SDR white)",
+          "Images with ICC  profiles are not supported: use --ignore-profile "
+          "and optionally set --cicp-input and/or --cicp-output if needed.") {
   argparse_.add_argument(arg_input_filename_, "input_image");
   argparse_.add_argument(arg_output_filename_, "output_image");
   argparse_.add_argument(arg_headroom_, "--headroom")
@@ -40,7 +42,9 @@ TonemapCommand::TonemapCommand()
           "primaries, 'transfer characteristics' defaults to 16 (PQ) if "
           "headroom > 0, or 13 (sRGB) otherwise, 'matrix coefficients' "
           "defaults to 6 (BT601).");
-  argparse_.add_argument(arg_clli_str_, "--clli")
+  argparse_
+      .add_argument<avifContentLightLevelInformationBox, ClliConverter>(
+          arg_clli_, "--clli")
       .help(
           "Override content light level information expressed as: "
           "MaxCLL,MaxPALL. Only relevant when saving to AVIF.");
@@ -49,34 +53,28 @@ TonemapCommand::TonemapCommand()
 }
 
 avifResult TonemapCommand::Run() {
-  avifContentLightLevelInformationBox clli_box = {};
-  bool clli_set = false;
-  if (arg_clli_str_.value().size() > 0) {
-    std::vector<uint16_t> clli;
-    if (!ParseList(arg_clli_str_, ',', 2, &clli)) {
-      std::cerr << "Invalid clli values, expected format: maxCLL,maxPALL where "
-                   "both maxCLL and maxPALL are positive integers, got: "
-                << arg_clli_str_ << "\n";
-      return AVIF_RESULT_INVALID_ARGUMENT;
-    }
-    clli_box.maxCLL = clli[0];
-    clli_box.maxPALL = clli[1];
-    clli_set = true;
-  }
+  avifContentLightLevelInformationBox clli_box = arg_clli_.value();
+  bool clli_set = arg_clli_.provenance() == argparse::Provenance::SPECIFIED;
 
   const float headroom = arg_headroom_;
   const bool tone_mapping_to_hdr = (headroom > 0.0f);
 
   DecoderPtr decoder(avifDecoderCreate());
-  if (decoder == NULL) {
+  if (decoder == nullptr) {
     return AVIF_RESULT_OUT_OF_MEMORY;
   }
-  decoder->enableDecodingGainMap = true;
-  decoder->enableParsingGainMapMetadata = true;
+  decoder->imageContentToDecode |= AVIF_IMAGE_CONTENT_GAIN_MAP;
   avifResult result = ReadAvif(decoder.get(), arg_input_filename_,
                                arg_image_read_.ignore_profile);
   if (result != AVIF_RESULT_OK) {
     return result;
+  }
+  if (arg_input_cicp_.provenance() == argparse::Provenance::SPECIFIED) {
+    decoder->image->colorPrimaries = arg_input_cicp_.value().color_primaries;
+    decoder->image->transferCharacteristics =
+        arg_input_cicp_.value().transfer_characteristics;
+    decoder->image->matrixCoefficients =
+        arg_input_cicp_.value().matrix_coefficients;
   }
 
   avifImage* image = decoder->image;
@@ -85,29 +83,31 @@ avifResult TonemapCommand::Run() {
               << " does not contain a gain map\n";
     return AVIF_RESULT_INVALID_ARGUMENT;
   }
-
-  avifGainMapMetadataDouble metadata;
-  if (!avifGainMapMetadataFractionsToDouble(&metadata,
-                                            &image->gainMap->metadata)) {
-    std::cerr << "Input image " << arg_input_filename_
-              << " has invalid gain map metadata\n";
+  if (image->gainMap->baseHdrHeadroom.d == 0 ||
+      image->gainMap->alternateHdrHeadroom.d == 0) {
     return AVIF_RESULT_INVALID_ARGUMENT;
   }
 
+  const float base_hdr_hreadroom =
+      static_cast<float>(image->gainMap->baseHdrHeadroom.n) /
+      image->gainMap->baseHdrHeadroom.d;
+  const float alternate_hdr_hreadroom =
+      static_cast<float>(image->gainMap->alternateHdrHeadroom.n) /
+      image->gainMap->alternateHdrHeadroom.d;
   // We are either tone mapping to the base image (i.e. leaving it as is),
   // or tone mapping to the alternate image (i.e. fully applying the gain map),
   // or tone mapping in between (partially applying the gain map).
   const bool tone_mapping_to_base =
-      (headroom <= metadata.baseHdrHeadroom &&
-       metadata.baseHdrHeadroom <= metadata.alternateHdrHeadroom) ||
-      (headroom >= metadata.baseHdrHeadroom &&
-       metadata.baseHdrHeadroom >= metadata.alternateHdrHeadroom);
+      (headroom <= base_hdr_hreadroom &&
+       base_hdr_hreadroom <= alternate_hdr_hreadroom) ||
+      (headroom >= base_hdr_hreadroom &&
+       base_hdr_hreadroom >= alternate_hdr_hreadroom);
   const bool tone_mapping_to_alternate =
-      (headroom <= metadata.alternateHdrHeadroom &&
-       metadata.alternateHdrHeadroom <= metadata.baseHdrHeadroom) ||
-      (headroom >= metadata.alternateHdrHeadroom &&
-       metadata.alternateHdrHeadroom >= metadata.baseHdrHeadroom);
-  const bool base_is_hdr = (metadata.baseHdrHeadroom != 0.0f);
+      (headroom <= alternate_hdr_hreadroom &&
+       alternate_hdr_hreadroom <= base_hdr_hreadroom) ||
+      (headroom >= alternate_hdr_hreadroom &&
+       alternate_hdr_hreadroom >= base_hdr_hreadroom);
+  const bool base_is_hdr = (base_hdr_hreadroom != 0.0f);
 
   // Determine output CICP.
   CicpValues cicp;
@@ -122,10 +122,9 @@ avifResult TonemapCommand::Run() {
             image->gainMap->altMatrixCoefficients};
   }
   if (cicp.color_primaries == AVIF_COLOR_PRIMARIES_UNSPECIFIED) {
-    // TODO(maryla): for now avifImageApplyGainMap always uses the primaries of
-    // the base image, but it should take into account the metadata's
-    // useBaseColorSpace property.
-    cicp.color_primaries = image->colorPrimaries;
+    cicp.color_primaries = image->gainMap->useBaseColorSpace
+                               ? image->colorPrimaries
+                               : image->gainMap->altColorPrimaries;
   }
   if (cicp.transfer_characteristics ==
       AVIF_TRANSFER_CHARACTERISTICS_UNSPECIFIED) {
@@ -188,7 +187,13 @@ avifResult TonemapCommand::Run() {
   if (tone_mapped == nullptr) {
     return AVIF_RESULT_OUT_OF_MEMORY;
   }
+  tone_mapped->colorPrimaries = cicp.color_primaries;
+  tone_mapped->transferCharacteristics = cicp.transfer_characteristics;
+  tone_mapped->matrixCoefficients = cicp.matrix_coefficients;
+  tone_mapped->clli = clli_box;
+
   avifRGBImage tone_mapped_rgb;
+  RGBImageCleanup rgb_cleanup(&tone_mapped_rgb);
   avifRGBImageSetDefaults(&tone_mapped_rgb, tone_mapped.get());
   avifDiagnostics diag;
   result = avifImageApplyGainMap(
@@ -207,13 +212,10 @@ avifResult TonemapCommand::Run() {
     return result;
   }
 
-  tone_mapped->clli = clli_box;
-  tone_mapped->transferCharacteristics = cicp.transfer_characteristics;
-  tone_mapped->colorPrimaries = cicp.color_primaries;
-  tone_mapped->matrixCoefficients = cicp.matrix_coefficients;
-
-  return WriteImage(tone_mapped.get(), arg_output_filename_,
-                    arg_image_encode_.quality, arg_image_encode_.speed);
+  return WriteImage(tone_mapped.get(), arg_image_encode_.grid.value().grid_cols,
+                    arg_image_encode_.grid.value().grid_rows,
+                    arg_output_filename_, arg_image_encode_.quality,
+                    arg_image_encode_.speed);
 }
 
 }  // namespace avif

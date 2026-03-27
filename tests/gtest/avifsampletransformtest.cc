@@ -30,7 +30,7 @@ class AvifExpression : public avifSampleTransformExpression {
   }
   void AddOperator(avifSampleTransformTokenType op) {
     avifSampleTransformToken& token = AddToken();
-    token.type = static_cast<uint8_t>(op);
+    token.type = op;
   }
 
   int32_t Apply() const {
@@ -64,6 +64,14 @@ class AvifExpression : public avifSampleTransformExpression {
   }
 };
 
+int32_t Eval(int32_t a, int32_t b, avifSampleTransformTokenType op) {
+  AvifExpression e;
+  e.AddConstant(a);
+  e.AddConstant(b);
+  e.AddOperator(op);
+  return e.Apply();
+}
+
 //------------------------------------------------------------------------------
 
 TEST(SampleTransformTest, NoExpression) {
@@ -85,7 +93,8 @@ TEST(SampleTransformTest, NoRecipe) {
 TEST(SampleTransformTest, RecipeToExpression) {
   for (avifSampleTransformRecipe recipe :
        {AVIF_SAMPLE_TRANSFORM_BIT_DEPTH_EXTENSION_8B_8B,
-        AVIF_SAMPLE_TRANSFORM_BIT_DEPTH_EXTENSION_12B_4B}) {
+        AVIF_SAMPLE_TRANSFORM_BIT_DEPTH_EXTENSION_12B_4B,
+        AVIF_SAMPLE_TRANSFORM_BIT_DEPTH_EXTENSION_12B_8B_OVERLAP_4B}) {
     AvifExpression expression;
     ASSERT_EQ(avifSampleTransformRecipeToExpression(recipe, &expression),
               AVIF_RESULT_OK);
@@ -128,6 +137,49 @@ TEST(SampleTransformTest, MaxStackSize) {
   EXPECT_EQ(e.Apply(), 255);
 }
 
+TEST(SampleTransformTest, Pow) {
+  // Results are clamped to uint8_t.
+
+  EXPECT_EQ(Eval(-2, INT32_MIN, AVIF_SAMPLE_TRANSFORM_POW), 0);
+  EXPECT_EQ(Eval(-2, -3, AVIF_SAMPLE_TRANSFORM_POW), 0);
+  EXPECT_EQ(Eval(-2, -2, AVIF_SAMPLE_TRANSFORM_POW), 0);
+  EXPECT_EQ(Eval(-2, -1, AVIF_SAMPLE_TRANSFORM_POW), 0);
+  EXPECT_EQ(Eval(-2, 0, AVIF_SAMPLE_TRANSFORM_POW), 1);
+  EXPECT_EQ(Eval(-2, 1, AVIF_SAMPLE_TRANSFORM_POW), 0);  // -2 clamped
+  EXPECT_EQ(Eval(-2, 2, AVIF_SAMPLE_TRANSFORM_POW), 4);
+  EXPECT_EQ(Eval(-2, 3, AVIF_SAMPLE_TRANSFORM_POW), 0);  // -8 clamped
+  EXPECT_EQ(Eval(-2, INT32_MAX - 1, AVIF_SAMPLE_TRANSFORM_POW),
+            255);  // INT32_MAX clamped
+  EXPECT_EQ(Eval(-2, INT32_MAX, AVIF_SAMPLE_TRANSFORM_POW),
+            0);  // INT32_MIN clamped
+
+  EXPECT_EQ(Eval(-1, INT32_MIN, AVIF_SAMPLE_TRANSFORM_POW), 1);
+  EXPECT_EQ(Eval(-1, -3, AVIF_SAMPLE_TRANSFORM_POW), 0);  // -1 clamped
+  EXPECT_EQ(Eval(-1, -2, AVIF_SAMPLE_TRANSFORM_POW), 1);
+  EXPECT_EQ(Eval(-1, -1, AVIF_SAMPLE_TRANSFORM_POW), 0);  // -1 clamped
+  EXPECT_EQ(Eval(-1, 0, AVIF_SAMPLE_TRANSFORM_POW), 1);
+  EXPECT_EQ(Eval(-1, 1, AVIF_SAMPLE_TRANSFORM_POW), 0);  // -1 clamped
+  EXPECT_EQ(Eval(-1, 2, AVIF_SAMPLE_TRANSFORM_POW), 1);
+  EXPECT_EQ(Eval(-1, 3, AVIF_SAMPLE_TRANSFORM_POW), 0);  // -1 clamped
+  EXPECT_EQ(Eval(-1, INT32_MAX - 1, AVIF_SAMPLE_TRANSFORM_POW), 1);
+  EXPECT_EQ(Eval(-1, INT32_MAX, AVIF_SAMPLE_TRANSFORM_POW), 0);  // -1 clamped
+
+  for (int32_t v : {0, 1}) {
+    EXPECT_EQ(Eval(v, INT32_MIN, AVIF_SAMPLE_TRANSFORM_POW), v);
+    EXPECT_EQ(Eval(v, -2, AVIF_SAMPLE_TRANSFORM_POW), v);
+    EXPECT_EQ(Eval(v, -1, AVIF_SAMPLE_TRANSFORM_POW), v);
+    EXPECT_EQ(Eval(v, 0, AVIF_SAMPLE_TRANSFORM_POW), v);
+    EXPECT_EQ(Eval(v, 1, AVIF_SAMPLE_TRANSFORM_POW), v);
+    EXPECT_EQ(Eval(v, 2, AVIF_SAMPLE_TRANSFORM_POW), v);
+    EXPECT_EQ(Eval(v, INT32_MAX, AVIF_SAMPLE_TRANSFORM_POW), v);
+  }
+
+  EXPECT_EQ(Eval(-(1 << 16), 3, AVIF_SAMPLE_TRANSFORM_POW),
+            0);  // INT32_MIN clamped
+  EXPECT_EQ(Eval((1 << 16), 3, AVIF_SAMPLE_TRANSFORM_POW),
+            255);  // INT32_MAX clamped
+}
+
 //------------------------------------------------------------------------------
 
 struct Op {
@@ -157,10 +209,10 @@ TEST_P(SampleTransformOperationTest, Apply) {
 
 INSTANTIATE_TEST_SUITE_P(
     Operations, SampleTransformOperationTest,
-    testing::Values(Op(AVIF_SAMPLE_TRANSFORM_NEGATE, 1, 0),
-                    Op(AVIF_SAMPLE_TRANSFORM_NEGATE, -1, 1),
-                    Op(AVIF_SAMPLE_TRANSFORM_NEGATE, 0, 0),
-                    Op(AVIF_SAMPLE_TRANSFORM_NEGATE, -256, 255),
+    testing::Values(Op(AVIF_SAMPLE_TRANSFORM_NEGATION, 1, 0),
+                    Op(AVIF_SAMPLE_TRANSFORM_NEGATION, -1, 1),
+                    Op(AVIF_SAMPLE_TRANSFORM_NEGATION, 0, 0),
+                    Op(AVIF_SAMPLE_TRANSFORM_NEGATION, -256, 255),
                     Op(AVIF_SAMPLE_TRANSFORM_ABSOLUTE, 1, 1),
                     Op(AVIF_SAMPLE_TRANSFORM_ABSOLUTE, -1, 1),
                     Op(AVIF_SAMPLE_TRANSFORM_ABSOLUTE, 256, 255),
@@ -175,8 +227,8 @@ INSTANTIATE_TEST_SUITE_P(
                     Op(-1, AVIF_SAMPLE_TRANSFORM_DIFFERENCE, 1, 0),
                     Op(1, AVIF_SAMPLE_TRANSFORM_PRODUCT, 1, 1),
                     Op(2, AVIF_SAMPLE_TRANSFORM_PRODUCT, 3, 6),
-                    Op(1, AVIF_SAMPLE_TRANSFORM_DIVIDE, 1, 1),
-                    Op(2, AVIF_SAMPLE_TRANSFORM_DIVIDE, 3, 0),
+                    Op(1, AVIF_SAMPLE_TRANSFORM_QUOTIENT, 1, 1),
+                    Op(2, AVIF_SAMPLE_TRANSFORM_QUOTIENT, 3, 0),
                     Op(1, AVIF_SAMPLE_TRANSFORM_AND, 1, 1),
                     Op(1, AVIF_SAMPLE_TRANSFORM_AND, 2, 0),
                     Op(7, AVIF_SAMPLE_TRANSFORM_AND, 15, 7),
@@ -185,10 +237,10 @@ INSTANTIATE_TEST_SUITE_P(
                     Op(1, AVIF_SAMPLE_TRANSFORM_XOR, 3, 2),
                     Op(AVIF_SAMPLE_TRANSFORM_NOT, 254, 0),
                     Op(AVIF_SAMPLE_TRANSFORM_NOT, -1, 0),
-                    Op(AVIF_SAMPLE_TRANSFORM_MSB, 0, 0),
-                    Op(AVIF_SAMPLE_TRANSFORM_MSB, -1, 0),
-                    Op(AVIF_SAMPLE_TRANSFORM_MSB, 61, 5),
-                    Op(AVIF_SAMPLE_TRANSFORM_MSB,
+                    Op(AVIF_SAMPLE_TRANSFORM_BSR, 0, 0),
+                    Op(AVIF_SAMPLE_TRANSFORM_BSR, -1, 0),
+                    Op(AVIF_SAMPLE_TRANSFORM_BSR, 61, 5),
+                    Op(AVIF_SAMPLE_TRANSFORM_BSR,
                        std::numeric_limits<int32_t>::max(), 30),
                     Op(2, AVIF_SAMPLE_TRANSFORM_POW, 4, 16),
                     Op(4, AVIF_SAMPLE_TRANSFORM_POW, 2, 16),

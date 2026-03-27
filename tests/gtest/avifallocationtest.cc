@@ -171,23 +171,34 @@ TEST(EncodingTest, MinimumInvalidDimensions) {
   TestEncoding(0, 1, 8, AVIF_RESULT_NO_CONTENT);
   TestEncoding(1, 0, 8, AVIF_RESULT_NO_CONTENT);
   TestEncoding(1, 1, 0, AVIF_RESULT_UNSUPPORTED_DEPTH);
-  TestEncoding(65536 + 1, 1, 8, AVIF_RESULT_ENCODE_COLOR_FAILED);
-  TestEncoding(1, 65536 + 1, 8, AVIF_RESULT_ENCODE_COLOR_FAILED);
-  TestEncoding(65536 + 1, 65536 + 1, 8, AVIF_RESULT_ENCODE_COLOR_FAILED);
+  TestEncoding(65536 + 1, 1, 8, AVIF_RESULT_INVALID_ARGUMENT);
+  TestEncoding(1, 65536 + 1, 8, AVIF_RESULT_INVALID_ARGUMENT);
+  TestEncoding(65536 + 1, 65536 + 1, 8, AVIF_RESULT_INVALID_ARGUMENT);
 }
 
 TEST(EncodingTest, MaximumInvalidDimensions) {
   TestEncoding(std::numeric_limits<decltype(avifImage::width)>::max(), 1, 8,
-               AVIF_RESULT_ENCODE_COLOR_FAILED);
+               AVIF_RESULT_INVALID_ARGUMENT);
   TestEncoding(1, std::numeric_limits<decltype(avifImage::height)>::max(), 8,
-               AVIF_RESULT_ENCODE_COLOR_FAILED);
+               AVIF_RESULT_INVALID_ARGUMENT);
   TestEncoding(std::numeric_limits<decltype(avifImage::width)>::max(),
                std::numeric_limits<decltype(avifImage::height)>::max(), 12,
-               AVIF_RESULT_ENCODE_COLOR_FAILED);
+               AVIF_RESULT_INVALID_ARGUMENT);
   TestEncoding(1, 1, std::numeric_limits<decltype(avifImage::depth)>::max(),
                AVIF_RESULT_UNSUPPORTED_DEPTH);
 }
 
+#if defined(__has_feature)
+#if __has_feature(memory_sanitizer)
+#define TEST_EXTREMES 0
+#else
+#define TEST_EXTREMES 1
+#endif
+#else
+#define TEST_EXTREMES 1
+#endif
+
+#if TEST_EXTREMES
 TEST(AvifAllocTest, Extremes) {
   void* p1 = avifAlloc(1);
   EXPECT_NE(p1, nullptr);
@@ -195,6 +206,7 @@ TEST(AvifAllocTest, Extremes) {
 
   EXPECT_EQ(avifAlloc(std::numeric_limits<size_t>::max()), nullptr);
 }
+#endif
 
 }  // namespace
 }  // namespace avif

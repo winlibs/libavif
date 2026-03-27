@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <memory>
 #include <tuple>
 
@@ -49,8 +50,8 @@ void ModifyImageChannel(avifRGBImage* image, uint32_t channel_offset,
 // Accumulates stats about the differences between the images a and b.
 template <typename PixelType>
 void GetDiffSumAndSqDiffSum(const avifRGBImage& a, const avifRGBImage& b,
-                            int64_t* diff_sum, int64_t* abs_diff_sum,
-                            int64_t* sq_diff_sum, int64_t* max_abs_diff) {
+                            int64_t* abs_diff_sum, int64_t* sq_diff_sum,
+                            int64_t* max_abs_diff) {
   const uint32_t channel_count = avifRGBFormatChannelCount(a.format);
   for (uint32_t y = 0; y < a.height; ++y) {
     const PixelType* row_a =
@@ -60,7 +61,6 @@ void GetDiffSumAndSqDiffSum(const avifRGBImage& a, const avifRGBImage& b,
     for (uint32_t x = 0; x < a.width * channel_count; ++x) {
       const int64_t diff =
           static_cast<int64_t>(row_b[x]) - static_cast<int64_t>(row_a[x]);
-      *diff_sum += diff;
       *abs_diff_sum += std::abs(diff);
       *sq_diff_sum += diff * diff;
       *max_abs_diff = std::max(*max_abs_diff, std::abs(diff));
@@ -69,12 +69,12 @@ void GetDiffSumAndSqDiffSum(const avifRGBImage& a, const avifRGBImage& b,
 }
 
 void GetDiffSumAndSqDiffSum(const avifRGBImage& a, const avifRGBImage& b,
-                            int64_t* diff_sum, int64_t* abs_diff_sum,
-                            int64_t* sq_diff_sum, int64_t* max_abs_diff) {
-  (a.depth <= 8) ? GetDiffSumAndSqDiffSum<uint8_t>(a, b, diff_sum, abs_diff_sum,
+                            int64_t* abs_diff_sum, int64_t* sq_diff_sum,
+                            int64_t* max_abs_diff) {
+  (a.depth <= 8) ? GetDiffSumAndSqDiffSum<uint8_t>(a, b, abs_diff_sum,
                                                    sq_diff_sum, max_abs_diff)
-                 : GetDiffSumAndSqDiffSum<uint16_t>(
-                       a, b, diff_sum, abs_diff_sum, sq_diff_sum, max_abs_diff);
+                 : GetDiffSumAndSqDiffSum<uint16_t>(a, b, abs_diff_sum,
+                                                    sq_diff_sum, max_abs_diff);
 }
 
 // Returns the Peak Signal-to-Noise Ratio from accumulated stats.
@@ -119,7 +119,7 @@ void ConvertWholeRange(int rgb_depth, int yuv_depth, avifRGBFormat rgb_format,
                        avifMatrixCoefficients matrix_coefficients,
                        avifChromaDownsampling chroma_downsampling,
                        bool add_noise, uint32_t rgb_step,
-                       double max_abs_average_diff, double min_psnr, bool log) {
+                       double max_average_abs_diff, double min_psnr, bool log) {
   // Deduced constants.
   const bool is_monochrome =
       (yuv_format == AVIF_PIXEL_FORMAT_YUV400);  // If so, only test grey input.
@@ -146,7 +146,7 @@ void ConvertWholeRange(int rgb_depth, int yuv_depth, avifRGBFormat rgb_format,
   }
 
   // Estimate the loss from converting RGB values to YUV and back.
-  int64_t diff_sum = 0, abs_diff_sum = 0, sq_diff_sum = 0, max_abs_diff = 0;
+  int64_t abs_diff_sum = 0, sq_diff_sum = 0, max_abs_diff = 0;
   int64_t num_diffs = 0;
   const uint32_t max_value = rgb_max - (add_noise ? 15 : 0);
   for (uint32_t r = 0; r < max_value + rgb_step; r += rgb_step) {
@@ -168,8 +168,8 @@ void ConvertWholeRange(int rgb_depth, int yuv_depth, avifRGBFormat rgb_format,
 
       ASSERT_EQ(avifImageRGBToYUV(yuv.get(), &src_rgb), AVIF_RESULT_OK);
       ASSERT_EQ(avifImageYUVToRGB(yuv.get(), &dst_rgb), AVIF_RESULT_OK);
-      GetDiffSumAndSqDiffSum(src_rgb, dst_rgb, &diff_sum, &abs_diff_sum,
-                             &sq_diff_sum, &max_abs_diff);
+      GetDiffSumAndSqDiffSum(src_rgb, dst_rgb, &abs_diff_sum, &sq_diff_sum,
+                             &max_abs_diff);
       num_diffs += src_rgb.width * src_rgb.height * 3;  // Alpha is lossless.
     } else {
       for (uint32_t g = 0; g < max_value + rgb_step; g += rgb_step) {
@@ -193,8 +193,8 @@ void ConvertWholeRange(int rgb_depth, int yuv_depth, avifRGBFormat rgb_format,
           }
           ASSERT_EQ(result, AVIF_RESULT_OK);
           ASSERT_EQ(avifImageYUVToRGB(yuv.get(), &dst_rgb), AVIF_RESULT_OK);
-          GetDiffSumAndSqDiffSum(src_rgb, dst_rgb, &diff_sum, &abs_diff_sum,
-                                 &sq_diff_sum, &max_abs_diff);
+          GetDiffSumAndSqDiffSum(src_rgb, dst_rgb, &abs_diff_sum, &sq_diff_sum,
+                                 &max_abs_diff);
           num_diffs +=
               src_rgb.width * src_rgb.height * 3;  // Alpha is lossless.
         }
@@ -206,13 +206,11 @@ void ConvertWholeRange(int rgb_depth, int yuv_depth, avifRGBFormat rgb_format,
   // Note: The thresholds defined in this test are calibrated for libyuv fast
   //       paths. See reformat_libyuv.c. Slower non-libyuv conversions in
   //       libavif have a higher precision (using floating point operations).
-  const double average_diff =
-      static_cast<double>(diff_sum) / static_cast<double>(num_diffs);
   const double average_abs_diff =
       static_cast<double>(abs_diff_sum) / static_cast<double>(num_diffs);
   const double psnr = GetPsnr(static_cast<double>(sq_diff_sum),
                               static_cast<double>(num_diffs), rgb_max);
-  EXPECT_LE(std::abs(average_diff), max_abs_average_diff);
+  EXPECT_LE(average_abs_diff, max_average_abs_diff);
   EXPECT_GE(psnr, min_psnr);
 
   if (log) {
@@ -223,9 +221,9 @@ void ConvertWholeRange(int rgb_depth, int yuv_depth, avifRGBFormat rgb_format,
               << kAvifRgbFormatToString[rgb_format] << ", "
               << avifPixelFormatToString(yuv_format) << ", "
               << (yuv_range ? "full" : "lmtd") << ", MC " << matrix_coefficients
-              << ", " << (add_noise ? "noisy" : "plain") << ", avg "
-              << average_diff << ", abs avg " << average_abs_diff << ", max "
-              << max_abs_diff << ", PSNR " << psnr << "dB" << std::endl;
+              << ", " << (add_noise ? "noisy" : "plain") << ", abs avg "
+              << average_abs_diff << ", max " << max_abs_diff << ", PSNR "
+              << psnr << "dB" << std::endl;
   }
 }
 
@@ -242,7 +240,7 @@ void ConvertWholeBuffer(int rgb_depth, int yuv_depth, avifRGBFormat rgb_format,
   const uint32_t rgb_max = (1 << rgb_depth) - 1;
 
   // Estimate the loss from converting RGB values to YUV and back.
-  int64_t diff_sum = 0, abs_diff_sum = 0, sq_diff_sum = 0, max_abs_diff = 0;
+  int64_t abs_diff_sum = 0, sq_diff_sum = 0, max_abs_diff = 0;
   int64_t num_diffs = 0;
   for (int width : {1, 2, 127}) {
     for (int height : {1, 2, 251}) {
@@ -279,14 +277,11 @@ void ConvertWholeBuffer(int rgb_depth, int yuv_depth, avifRGBFormat rgb_format,
       }
       ASSERT_EQ(result, AVIF_RESULT_OK);
       ASSERT_EQ(avifImageYUVToRGB(yuv.get(), &dst_rgb), AVIF_RESULT_OK);
-      GetDiffSumAndSqDiffSum(src_rgb, dst_rgb, &diff_sum, &abs_diff_sum,
-                             &sq_diff_sum, &max_abs_diff);
+      GetDiffSumAndSqDiffSum(src_rgb, dst_rgb, &abs_diff_sum, &sq_diff_sum,
+                             &max_abs_diff);
       num_diffs += src_rgb.width * src_rgb.height * 3;
     }
   }
-  // max_abs_average_diff is not tested here because it is not meaningful for
-  // only 3*3 conversions as it takes the maximum difference per conversion.
-  // PSNR is averaged on all pixels so it can be tested here.
   EXPECT_GE(GetPsnr(static_cast<double>(sq_diff_sum),
                     static_cast<double>(num_diffs), rgb_max),
             min_psnr);
@@ -335,7 +330,7 @@ TEST(RGBToYUVTest, ExhaustiveSettings) {
                     // Just try min and max values.
                     /*rgb_step=*/(1u << rgb_depth) - 1u,
                     // Barely check the results, this is mostly for coverage.
-                    /*max_abs_average_diff=*/(1u << rgb_depth) - 1u,
+                    /*max_average_abs_diff=*/(1u << rgb_depth) - 1u,
                     /*min_psnr=*/5.0,
                     // Avoid spam.
                     /*log=*/false);
@@ -366,7 +361,9 @@ TEST(RGBToYUVTest, AllMatrixCoefficients) {
                    AVIF_MATRIX_COEFFICIENTS_SMPTE240,
                    AVIF_MATRIX_COEFFICIENTS_YCGCO,
                    AVIF_MATRIX_COEFFICIENTS_BT2020_NCL,
-                   AVIF_MATRIX_COEFFICIENTS_CHROMA_DERIVED_NCL
+                   AVIF_MATRIX_COEFFICIENTS_CHROMA_DERIVED_NCL,
+                   AVIF_MATRIX_COEFFICIENTS_YCGCO_RE,
+                   AVIF_MATRIX_COEFFICIENTS_YCGCO_RO,
                    // These are unsupported. See avifPrepareReformatState().
                    // AVIF_MATRIX_COEFFICIENTS_BT2020_CL
                    // AVIF_MATRIX_COEFFICIENTS_SMPTE2085
@@ -376,6 +373,19 @@ TEST(RGBToYUVTest, AllMatrixCoefficients) {
             if (matrix_coefficients == AVIF_MATRIX_COEFFICIENTS_YCGCO &&
                 yuv_range == AVIF_RANGE_LIMITED) {
               // See avifPrepareReformatState().
+              continue;
+            }
+            if ((matrix_coefficients == AVIF_MATRIX_COEFFICIENTS_YCGCO_RE &&
+                 yuv_depth - 2 != rgb_depth) ||
+                (matrix_coefficients == AVIF_MATRIX_COEFFICIENTS_YCGCO_RO &&
+                 yuv_depth - 1 != rgb_depth)) {
+              // See avifPrepareReformatState().
+              continue;
+            }
+            if ((matrix_coefficients == AVIF_MATRIX_COEFFICIENTS_YCGCO_RE ||
+                 matrix_coefficients == AVIF_MATRIX_COEFFICIENTS_YCGCO_RO) &&
+                yuv_range != AVIF_RANGE_FULL) {
+              // YCgCo-R is for lossless.
               continue;
             }
             for (avifChromaDownsampling chroma_downsampling :
@@ -390,7 +400,7 @@ TEST(RGBToYUVTest, AllMatrixCoefficients) {
                   // Just try min and max values.
                   /*rgb_step=*/(1u << rgb_depth) - 1u,
                   // Barely check the results, this is mostly for coverage.
-                  /*max_abs_average_diff=*/(1u << rgb_depth) - 1u,
+                  /*max_average_abs_diff=*/(1u << rgb_depth) - 1u,
                   /*min_psnr=*/5.0,
                   // Avoid spam.
                   /*log=*/false);
@@ -402,6 +412,114 @@ TEST(RGBToYUVTest, AllMatrixCoefficients) {
   }
 }
 
+TEST(RGBToYUVTest, 8BitGrayToYUV420) {
+  // 2x2 8-bit image
+  static const uint8_t gray[4] = {4, 3, 2, 1};
+  ImagePtr image(avifImageCreate(2, 2, 8, AVIF_PIXEL_FORMAT_YUV420));
+  ASSERT_NE(image, nullptr);
+  avifRGBImage rgb;
+  avifRGBImageSetDefaults(&rgb, image.get());
+  rgb.format = AVIF_RGB_FORMAT_GRAY;
+  rgb.avoidLibYUV = AVIF_TRUE;
+  rgb.pixels = const_cast<uint8_t*>(gray);
+  rgb.rowBytes = 2 * sizeof(uint8_t);
+  ASSERT_EQ(avifImageRGBToYUV(image.get(), &rgb), AVIF_RESULT_OK);
+  const uint8_t* y_plane = image->yuvPlanes[AVIF_CHAN_Y];
+  const uint8_t* u_plane = image->yuvPlanes[AVIF_CHAN_U];
+  const uint8_t* v_plane = image->yuvPlanes[AVIF_CHAN_V];
+  EXPECT_EQ(y_plane[0], gray[0]);
+  EXPECT_EQ(y_plane[1], gray[1]);
+  EXPECT_EQ(y_plane[2], gray[2]);
+  EXPECT_EQ(y_plane[3], gray[3]);
+  EXPECT_EQ(u_plane[0], 128);
+  EXPECT_EQ(v_plane[0], 128);
+}
+
+TEST(RGBToYUVTest, HighBitDepthGrayToYUV420) {
+  // 2x2 10-bit, 12-bit, or 16-bit image
+  static const uint16_t gray[4] = {4, 3, 2, 1};
+  static const uint32_t depth[3] = {10, 12, 16};
+  static const uint16_t half[3] = {512, 2048, 32768};
+  for (int i = 0; i < 3; i++) {
+    ImagePtr image(avifImageCreate(2, 2, depth[i], AVIF_PIXEL_FORMAT_YUV420));
+    ASSERT_NE(image, nullptr);
+    avifRGBImage rgb;
+    avifRGBImageSetDefaults(&rgb, image.get());
+    rgb.format = AVIF_RGB_FORMAT_GRAY;
+    rgb.avoidLibYUV = AVIF_TRUE;
+    rgb.pixels = reinterpret_cast<uint8_t*>(const_cast<uint16_t*>(gray));
+    rgb.rowBytes = 2 * sizeof(uint16_t);
+    ASSERT_EQ(avifImageRGBToYUV(image.get(), &rgb), AVIF_RESULT_OK);
+    const uint16_t* y_plane =
+        reinterpret_cast<uint16_t*>(image->yuvPlanes[AVIF_CHAN_Y]);
+    const uint16_t* u_plane =
+        reinterpret_cast<uint16_t*>(image->yuvPlanes[AVIF_CHAN_U]);
+    const uint16_t* v_plane =
+        reinterpret_cast<uint16_t*>(image->yuvPlanes[AVIF_CHAN_V]);
+    EXPECT_EQ(y_plane[0], gray[0]);
+    EXPECT_EQ(y_plane[1], gray[1]);
+    EXPECT_EQ(y_plane[2], gray[2]);
+    EXPECT_EQ(y_plane[3], gray[3]);
+    EXPECT_EQ(u_plane[0], half[i]);
+    EXPECT_EQ(v_plane[0], half[i]);
+  }
+}
+
+TEST(RGBToYUVTest, 8BitGrayRoundTripWithLift) {
+  for (avifRange range : {AVIF_RANGE_LIMITED, AVIF_RANGE_FULL}) {
+    // 2x2 12-bit temporary image.
+    ImagePtr image(avifImageCreate(2, 2, 12, AVIF_PIXEL_FORMAT_YUV400));
+    ASSERT_NE(image, nullptr);
+    image->yuvRange = range;
+    // 2x2 8-bit original image.
+    static constexpr uint8_t gray[4] = {5, 3, 2, 1};
+    avifRGBImage rgb;
+    avifRGBImageSetDefaults(&rgb, image.get());
+    rgb.format = AVIF_RGB_FORMAT_GRAY;
+    rgb.avoidLibYUV = AVIF_TRUE;
+    rgb.depth = 8;
+    rgb.pixels = const_cast<uint8_t*>(gray);
+    rgb.rowBytes = 2 * sizeof(uint8_t);
+    // Convert to 12 bits.
+    ASSERT_EQ(avifImageRGBToYUV(image.get(), &rgb), AVIF_RESULT_OK);
+    // Convert back to 8 bits.
+    avifRGBImage rgb_final;
+    avifRGBImageSetDefaults(&rgb_final, image.get());
+    rgb_final.format = AVIF_RGB_FORMAT_GRAY;
+    rgb_final.avoidLibYUV = AVIF_TRUE;
+    rgb_final.depth = 8;
+    ASSERT_EQ(avifRGBImageAllocatePixels(&rgb_final), AVIF_RESULT_OK);
+    ASSERT_EQ(avifImageYUVToRGB(image.get(), &rgb_final), AVIF_RESULT_OK);
+    // Compare to the original 8-bit image.
+    const uint8_t* gray_plane = rgb_final.pixels;
+    EXPECT_EQ(gray_plane[0], gray[0]);
+    EXPECT_EQ(gray_plane[1], gray[1]);
+    EXPECT_EQ(gray_plane[2], gray[2]);
+    EXPECT_EQ(gray_plane[3], gray[3]);
+    avifRGBImageFreePixels(&rgb_final);
+  }
+}
+
+TEST(RGBToYUVTest, ZeroWidthOrHeight) {
+  avifRGBImage rgb;
+  memset(&rgb, 0, sizeof(rgb));
+  rgb.depth = 8;
+  rgb.format = AVIF_RGB_FORMAT_RGB;
+
+  rgb.width = 0;
+  rgb.height = 1;
+  EXPECT_EQ(avifRGBImageAllocatePixels(&rgb), AVIF_RESULT_INVALID_ARGUMENT);
+
+  rgb.width = 1;
+  rgb.height = 0;
+  EXPECT_EQ(avifRGBImageAllocatePixels(&rgb), AVIF_RESULT_INVALID_ARGUMENT);
+
+  rgb.width = 1;
+  rgb.height = 1;
+  EXPECT_EQ(avifRGBImageAllocatePixels(&rgb), AVIF_RESULT_OK);
+  avifRGBImageFreePixels(&rgb);
+}
+
 //------------------------------------------------------------------------------
 // Selected configurations
 
@@ -410,7 +528,7 @@ class RGBToYUVTest
           /*rgb_depth=*/int, /*yuv_depth=*/int, avifRGBFormat, avifPixelFormat,
           avifRange, avifMatrixCoefficients, avifChromaDownsampling,
           /*add_noise=*/bool, /*rgb_step=*/uint32_t,
-          /*max_abs_average_diff=*/double, /*min_psnr=*/double>> {};
+          /*max_average_abs_diff=*/double, /*min_psnr=*/double>> {};
 
 TEST_P(RGBToYUVTest, ConvertWholeRange) {
   ConvertWholeRange(
@@ -428,7 +546,7 @@ TEST_P(RGBToYUVTest, ConvertWholeRange) {
       // similar with faster settings.
       /*rgb_step=*/std::get<8>(GetParam()),
       // Thresholds to pass.
-      /*max_abs_average_diff=*/std::get<9>(GetParam()),
+      /*max_average_abs_diff=*/std::get<9>(GetParam()),
       /*min_psnr=*/std::get<10>(GetParam()),
       // Useful to see surrounding results when there is a failure.
       /*log=*/true);
@@ -458,6 +576,8 @@ constexpr avifMatrixCoefficients kMatrixCoefficientsBT709 =
     AVIF_MATRIX_COEFFICIENTS_BT709;
 constexpr avifMatrixCoefficients kMatrixCoefficientsIdentity =
     AVIF_MATRIX_COEFFICIENTS_IDENTITY;
+constexpr avifMatrixCoefficients kMatrixCoefficientsYCgCoRe =
+    AVIF_MATRIX_COEFFICIENTS_YCGCO_RE;
 
 // This is the default avifenc setup when encoding from 8b PNG files to AVIF.
 INSTANTIATE_TEST_SUITE_P(
@@ -469,8 +589,7 @@ INSTANTIATE_TEST_SUITE_P(
             Values(AVIF_CHROMA_DOWNSAMPLING_AUTOMATIC),
             /*add_noise=*/Values(true),
             /*rgb_step=*/Values(3),
-            /*max_abs_average_diff=*/Values(0.1),  // The color drift is almost
-                                                   // centered.
+            /*max_average_abs_diff=*/Values(2.88),
             /*min_psnr=*/Values(36.)  // Subsampling distortion is acceptable.
             ));
 
@@ -486,7 +605,7 @@ INSTANTIATE_TEST_SUITE_P(Identity8b, RGBToYUVTest,
                                  Values(AVIF_CHROMA_DOWNSAMPLING_AUTOMATIC),
                                  /*add_noise=*/Values(true),
                                  /*rgb_step=*/Values(31),
-                                 /*max_abs_average_diff=*/Values(0.),
+                                 /*max_average_abs_diff=*/Values(0.),
                                  /*min_psnr=*/Values(99.)));
 INSTANTIATE_TEST_SUITE_P(Identity10b, RGBToYUVTest,
                          Combine(/*rgb_depth=*/Values(10),
@@ -498,7 +617,7 @@ INSTANTIATE_TEST_SUITE_P(Identity10b, RGBToYUVTest,
                                  Values(AVIF_CHROMA_DOWNSAMPLING_AUTOMATIC),
                                  /*add_noise=*/Values(true),
                                  /*rgb_step=*/Values(101),
-                                 /*max_abs_average_diff=*/Values(0.),
+                                 /*max_average_abs_diff=*/Values(0.),
                                  /*min_psnr=*/Values(99.)));
 INSTANTIATE_TEST_SUITE_P(Identity12b, RGBToYUVTest,
                          Combine(/*rgb_depth=*/Values(12),
@@ -510,7 +629,7 @@ INSTANTIATE_TEST_SUITE_P(Identity12b, RGBToYUVTest,
                                  Values(AVIF_CHROMA_DOWNSAMPLING_AUTOMATIC),
                                  /*add_noise=*/Values(true),
                                  /*rgb_step=*/Values(401),
-                                 /*max_abs_average_diff=*/Values(0.),
+                                 /*max_average_abs_diff=*/Values(0.),
                                  /*min_psnr=*/Values(99.)));
 INSTANTIATE_TEST_SUITE_P(Identity16b, RGBToYUVTest,
                          Combine(/*rgb_depth=*/Values(16),
@@ -522,7 +641,7 @@ INSTANTIATE_TEST_SUITE_P(Identity16b, RGBToYUVTest,
                                  Values(AVIF_CHROMA_DOWNSAMPLING_AUTOMATIC),
                                  /*add_noise=*/Values(true),
                                  /*rgb_step=*/Values(6421),
-                                 /*max_abs_average_diff=*/Values(0.),
+                                 /*max_average_abs_diff=*/Values(0.),
                                  /*min_psnr=*/Values(99.)));
 
 // 4:4:4 and chroma subsampling have similar distortions on plain color inputs.
@@ -536,7 +655,7 @@ INSTANTIATE_TEST_SUITE_P(
         Values(AVIF_CHROMA_DOWNSAMPLING_AUTOMATIC),
         /*add_noise=*/Values(false),
         /*rgb_step=*/Values(17),
-        /*max_abs_average_diff=*/Values(0.02),  // The color drift is centered.
+        /*max_average_abs_diff=*/Values(0.84),
         /*min_psnr=*/Values(45.)  // RGB>YUV>RGB distortion is barely
                                   // noticeable.
         ));
@@ -553,7 +672,7 @@ INSTANTIATE_TEST_SUITE_P(MonochromeLossless8b, RGBToYUVTest,
                                  Values(AVIF_CHROMA_DOWNSAMPLING_AUTOMATIC),
                                  /*add_noise=*/Values(false),
                                  /*rgb_step=*/Values(1),
-                                 /*max_abs_average_diff=*/Values(0.),
+                                 /*max_average_abs_diff=*/Values(0.),
                                  /*min_psnr=*/Values(99.)));
 INSTANTIATE_TEST_SUITE_P(MonochromeLossless10b, RGBToYUVTest,
                          Combine(/*rgb_depth=*/Values(10),
@@ -565,7 +684,7 @@ INSTANTIATE_TEST_SUITE_P(MonochromeLossless10b, RGBToYUVTest,
                                  Values(AVIF_CHROMA_DOWNSAMPLING_AUTOMATIC),
                                  /*add_noise=*/Values(false),
                                  /*rgb_step=*/Values(1),
-                                 /*max_abs_average_diff=*/Values(0.),
+                                 /*max_average_abs_diff=*/Values(0.),
                                  /*min_psnr=*/Values(99.)));
 INSTANTIATE_TEST_SUITE_P(MonochromeLossless12b, RGBToYUVTest,
                          Combine(/*rgb_depth=*/Values(12),
@@ -577,7 +696,7 @@ INSTANTIATE_TEST_SUITE_P(MonochromeLossless12b, RGBToYUVTest,
                                  Values(AVIF_CHROMA_DOWNSAMPLING_AUTOMATIC),
                                  /*add_noise=*/Values(false),
                                  /*rgb_step=*/Values(1),
-                                 /*max_abs_average_diff=*/Values(0.),
+                                 /*max_average_abs_diff=*/Values(0.),
                                  /*min_psnr=*/Values(99.)));
 INSTANTIATE_TEST_SUITE_P(MonochromeLossless16b, RGBToYUVTest,
                          Combine(/*rgb_depth=*/Values(16),
@@ -589,7 +708,21 @@ INSTANTIATE_TEST_SUITE_P(MonochromeLossless16b, RGBToYUVTest,
                                  Values(AVIF_CHROMA_DOWNSAMPLING_AUTOMATIC),
                                  /*add_noise=*/Values(false),
                                  /*rgb_step=*/Values(401),
-                                 /*max_abs_average_diff=*/Values(0.),
+                                 /*max_average_abs_diff=*/Values(0.),
+                                 /*min_psnr=*/Values(99.)));
+
+// Tests YCGCO_RE is lossless.
+INSTANTIATE_TEST_SUITE_P(YCgCo_Re8b, RGBToYUVTest,
+                         Combine(/*rgb_depth=*/Values(8),
+                                 /*yuv_depth=*/Values(10),
+                                 Values(AVIF_RGB_FORMAT_RGBA),
+                                 Values(AVIF_PIXEL_FORMAT_YUV444),
+                                 Values(AVIF_RANGE_FULL),
+                                 Values(kMatrixCoefficientsYCgCoRe),
+                                 Values(AVIF_CHROMA_DOWNSAMPLING_AUTOMATIC),
+                                 /*add_noise=*/Values(true),
+                                 /*rgb_step=*/Values(101),
+                                 /*max_average_abs_diff=*/Values(0.),
                                  /*min_psnr=*/Values(99.)));
 
 // Coverage for reformat_libsharpyuv.c.
@@ -603,8 +736,8 @@ INSTANTIATE_TEST_SUITE_P(
         Values(AVIF_CHROMA_DOWNSAMPLING_SHARP_YUV),
         /*add_noise=*/Values(true),
         /*rgb_step=*/Values(17),
-        /*max_abs_average_diff=*/Values(1.2),  // Sharp YUV introduces some
-                                               // color shift.
+        /*max_average_abs_diff=*/Values(2.97),  // Sharp YUV introduces some
+                                                // color shift.
         /*min_psnr=*/Values(34.)  // SharpYuv distortion is acceptable.
         ));
 INSTANTIATE_TEST_SUITE_P(
@@ -618,8 +751,8 @@ INSTANTIATE_TEST_SUITE_P(
         Values(AVIF_CHROMA_DOWNSAMPLING_SHARP_YUV),
         /*add_noise=*/Values(true),
         /*rgb_step=*/Values(17),
-        /*max_abs_average_diff=*/Values(1.2),  // Sharp YUV introduces some
-                                               // color shift.
+        /*max_average_abs_diff=*/Values(2.94),  // Sharp YUV introduces some
+                                                // color shift.
         /*min_psnr=*/Values(34.)  // SharpYuv distortion is acceptable.
         ));
 INSTANTIATE_TEST_SUITE_P(
@@ -632,8 +765,8 @@ INSTANTIATE_TEST_SUITE_P(
         Values(AVIF_CHROMA_DOWNSAMPLING_SHARP_YUV),
         /*add_noise=*/Values(true),
         /*rgb_step=*/Values(17),
-        /*max_abs_average_diff=*/Values(1.2),  // Sharp YUV introduces some
-                                               // color shift.
+        /*max_average_abs_diff=*/Values(2.94),  // Sharp YUV introduces some
+                                                // color shift.
         /*min_psnr=*/Values(34.)  // SharpYuv distortion is acceptable.
         ));
 INSTANTIATE_TEST_SUITE_P(
@@ -645,9 +778,9 @@ INSTANTIATE_TEST_SUITE_P(
         Values(kMatrixCoefficientsBT601),
         Values(AVIF_CHROMA_DOWNSAMPLING_SHARP_YUV),
         /*add_noise=*/Values(true),
-        /*rgb_step=*/Values(211),              // High or it would be too slow.
-        /*max_abs_average_diff=*/Values(1.2),  // Sharp YUV introduces some
-                                               // color shift.
+        /*rgb_step=*/Values(211),               // High or it would be too slow.
+        /*max_average_abs_diff=*/Values(2.94),  // Sharp YUV introduces some
+                                                // color shift.
         /*min_psnr=*/Values(34.)  // SharpYuv distortion is acceptable.
         ));
 INSTANTIATE_TEST_SUITE_P(
@@ -659,24 +792,23 @@ INSTANTIATE_TEST_SUITE_P(
         Values(kMatrixCoefficientsBT601),
         Values(AVIF_CHROMA_DOWNSAMPLING_SHARP_YUV),
         /*add_noise=*/Values(true),
-        /*rgb_step=*/Values(840),              // High or it would be too slow.
-        /*max_abs_average_diff=*/Values(1.2),  // Sharp YUV introduces some
-                                               // color shift.
+        /*rgb_step=*/Values(840),               // High or it would be too slow.
+        /*max_average_abs_diff=*/Values(6.57),  // Sharp YUV introduces some
+                                                // color shift.
         /*min_psnr=*/Values(34.)  // SharpYuv distortion is acceptable.
         ));
 INSTANTIATE_TEST_SUITE_P(
     SharpYuv16Bit, RGBToYUVTest,
     Combine(
         /*rgb_depth=*/Values(16),
-        // TODO(yguyon): Why max_abs_average_diff>28 if RGB16 to YUV10 full rng?
         /*yuv_depth=*/Values(8, /*10,*/ 12), Values(AVIF_RGB_FORMAT_RGBA),
         Values(AVIF_PIXEL_FORMAT_YUV420), Values(AVIF_RANGE_FULL),
         Values(kMatrixCoefficientsBT601),
         Values(AVIF_CHROMA_DOWNSAMPLING_SHARP_YUV),
         /*add_noise=*/Values(true),
-        /*rgb_step=*/Values(4567),             // High or it would be too slow.
-        /*max_abs_average_diff=*/Values(2.5),  // Sharp YUV introduces some
-                                               // color shift.
+        /*rgb_step=*/Values(4567),  // High or it would be too slow.
+        /*max_average_abs_diff=*/Values(111.7),  // Sharp YUV introduces some
+                                                 // color shift.
         /*min_psnr=*/Values(49.)  // SharpYuv distortion is acceptable.
         ));
 
@@ -693,8 +825,8 @@ INSTANTIATE_TEST_SUITE_P(
             Values(AVIF_CHROMA_DOWNSAMPLING_AUTOMATIC),
             /*add_noise=*/Bool(),
             /*rgb_step=*/Values(61),  // High or it would be too slow.
-            /*max_abs_average_diff=*/Values(1.),  // Not very accurate because
-                                                  // of high rgb_step.
+            /*max_average_abs_diff=*/Values(2.96),  // Not very accurate because
+                                                    // of high rgb_step.
             /*min_psnr=*/Values(36.)));
 INSTANTIATE_TEST_SUITE_P(
     All10b, RGBToYUVTest,
@@ -705,8 +837,8 @@ INSTANTIATE_TEST_SUITE_P(
             Values(AVIF_CHROMA_DOWNSAMPLING_AUTOMATIC),
             /*add_noise=*/Bool(),
             /*rgb_step=*/Values(211),  // High or it would be too slow.
-            /*max_abs_average_diff=*/Values(0.2),  // Not very accurate because
-                                                   // of high rgb_step.
+            /*max_average_abs_diff=*/Values(2.83),  // Not very accurate because
+                                                    // of high rgb_step.
             /*min_psnr=*/Values(47.)));
 INSTANTIATE_TEST_SUITE_P(
     All12b, RGBToYUVTest,
@@ -717,8 +849,8 @@ INSTANTIATE_TEST_SUITE_P(
             Values(AVIF_CHROMA_DOWNSAMPLING_AUTOMATIC),
             /*add_noise=*/Bool(),
             /*rgb_step=*/Values(809),  // High or it would be too slow.
-            /*max_abs_average_diff=*/Values(0.3),  // Not very accurate because
-                                                   // of high rgb_step.
+            /*max_average_abs_diff=*/Values(2.82),  // Not very accurate because
+                                                    // of high rgb_step.
             /*min_psnr=*/Values(52.)));
 INSTANTIATE_TEST_SUITE_P(
     All16b, RGBToYUVTest,
@@ -729,7 +861,7 @@ INSTANTIATE_TEST_SUITE_P(
             Values(AVIF_CHROMA_DOWNSAMPLING_AUTOMATIC),
             /*add_noise=*/Bool(),
             /*rgb_step=*/Values(16001),  // High or it would be too slow.
-            /*max_abs_average_diff=*/Values(0.05),
+            /*max_average_abs_diff=*/Values(2.82),
             /*min_psnr=*/Values(80.)));
 
 // This was used to estimate the quality loss of libyuv for RGB-to-YUV.
@@ -745,7 +877,7 @@ INSTANTIATE_TEST_SUITE_P(
             Values(AVIF_CHROMA_DOWNSAMPLING_AUTOMATIC),
             /*add_noise=*/Bool(),
             /*rgb_step=*/Values(3),  // way faster and 99% similar to rgb_step=1
-            /*max_abs_average_diff=*/Values(10.),
+            /*max_average_abs_diff=*/Values(10.),
             /*min_psnr=*/Values(10.)));
 
 }  // namespace

@@ -21,13 +21,15 @@ avifBool avifSampleTransformExpressionIsValid(const avifSampleTransformExpressio
             AVIF_CHECK(token->inputImageItemIndex != 0);
             AVIF_CHECK(token->inputImageItemIndex <= numInputImageItems);
         }
-        if (token->type == AVIF_SAMPLE_TRANSFORM_CONSTANT || token->type == AVIF_SAMPLE_TRANSFORM_INPUT_IMAGE_ITEM_INDEX) {
+        if (token->type < AVIF_SAMPLE_TRANSFORM_FIRST_UNARY_OPERATOR) {
+            // Likely an operand.
             ++stackSize;
-        } else if (token->type == AVIF_SAMPLE_TRANSFORM_NEGATE || token->type == AVIF_SAMPLE_TRANSFORM_ABSOLUTE ||
-                   token->type == AVIF_SAMPLE_TRANSFORM_NOT || token->type == AVIF_SAMPLE_TRANSFORM_MSB) {
+        } else if (token->type < AVIF_SAMPLE_TRANSFORM_FIRST_BINARY_OPERATOR) {
+            // Likely a unary operator.
             AVIF_CHECK(stackSize >= 1);
             // Pop one and push one.
         } else {
+            // Likely a binary operator.
             AVIF_CHECK(stackSize >= 2);
             --stackSize; // Pop two and push one.
         }
@@ -83,7 +85,7 @@ static avifBool avifPushOperator(avifSampleTransformExpression * expression, avi
     if (token == NULL) {
         return AVIF_FALSE;
     }
-    token->type = (uint8_t) operator;
+    token->type = (uint8_t)operator;
     return AVIF_TRUE;
 }
 
@@ -131,9 +133,36 @@ avifResult avifSampleTransformRecipeToExpression(avifSampleTransformRecipe recip
             // The second image represents the 4 least significant bits of the reconstructed, bit-depth-extended output image.
             AVIF_ASSERT_OR_RETURN(avifPushInputImageItem(expression, 2));
             AVIF_ASSERT_OR_RETURN(avifPushConstant(expression, 16));
-            AVIF_ASSERT_OR_RETURN(avifPushOperator(expression, AVIF_SAMPLE_TRANSFORM_DIVIDE));
+            AVIF_ASSERT_OR_RETURN(avifPushOperator(expression, AVIF_SAMPLE_TRANSFORM_QUOTIENT));
         }
         AVIF_ASSERT_OR_RETURN(avifPushOperator(expression, AVIF_SAMPLE_TRANSFORM_SUM));
+        return AVIF_RESULT_OK;
+    }
+
+    if (recipe == AVIF_SAMPLE_TRANSFORM_BIT_DEPTH_EXTENSION_12B_8B_OVERLAP_4B) {
+        // reference_count is two: one 12-bit input image and one 8-bit input image.
+        //   (base_sample << 4) + hidden_sample
+        // Note: Both base_sample and hidden_sample are encoded lossily or losslessly. hidden_sample overlaps
+        //       with base_sample by 4 bits to alleviate the loss caused by the quantization of base_sample.
+        AVIF_CHECKERR(avifArrayCreate(expression, sizeof(avifSampleTransformToken), 7), AVIF_RESULT_OUT_OF_MEMORY);
+
+        // The base image represents the 12 most significant bits of the reconstructed, bit-depth-extended output image.
+        // Left shift the base image (which is also the primary item, or the auxiliary alpha item of the primary item)
+        // by 4 bits. This is equivalent to multiplying by 2^4.
+        AVIF_ASSERT_OR_RETURN(avifPushConstant(expression, 16));
+        AVIF_ASSERT_OR_RETURN(avifPushInputImageItem(expression, 1));
+        AVIF_ASSERT_OR_RETURN(avifPushOperator(expression, AVIF_SAMPLE_TRANSFORM_PRODUCT));
+
+        // The second image represents the offset to apply to the shifted base image to retrieve
+        // the original image, with some loss due to quantization.
+        AVIF_ASSERT_OR_RETURN(avifPushInputImageItem(expression, 2));
+        AVIF_ASSERT_OR_RETURN(avifPushOperator(expression, AVIF_SAMPLE_TRANSFORM_SUM));
+
+        // The second image is offset by 128 to have unsigned values to encode.
+        // Correct that last to always work with unsigned values in the operations above.
+        AVIF_ASSERT_OR_RETURN(avifPushConstant(expression, 128));
+        AVIF_ASSERT_OR_RETURN(avifPushOperator(expression, AVIF_SAMPLE_TRANSFORM_DIFFERENCE));
+        // Sample values are clamped to [0:1<<depth[ at that point.
         return AVIF_RESULT_OK;
     }
 
@@ -144,7 +173,8 @@ avifResult avifSampleTransformExpressionToRecipe(const avifSampleTransformExpres
 {
     *recipe = AVIF_SAMPLE_TRANSFORM_NONE;
     const avifSampleTransformRecipe kAllRecipes[] = { AVIF_SAMPLE_TRANSFORM_BIT_DEPTH_EXTENSION_8B_8B,
-                                                      AVIF_SAMPLE_TRANSFORM_BIT_DEPTH_EXTENSION_12B_4B };
+                                                      AVIF_SAMPLE_TRANSFORM_BIT_DEPTH_EXTENSION_12B_4B,
+                                                      AVIF_SAMPLE_TRANSFORM_BIT_DEPTH_EXTENSION_12B_8B_OVERLAP_4B };
     for (size_t i = 0; i < sizeof(kAllRecipes) / sizeof(kAllRecipes[0]); ++i) {
         avifSampleTransformRecipe candidateRecipe = kAllRecipes[i];
         avifSampleTransformExpression candidateExpression = { 0 };
@@ -170,13 +200,13 @@ static int32_t avifSampleTransformClamp32b(int64_t value)
 static int32_t avifSampleTransformOperation32bOneOperand(int32_t operand, uint8_t operator)
 {
     switch (operator) {
-        case AVIF_SAMPLE_TRANSFORM_NEGATE:
+        case AVIF_SAMPLE_TRANSFORM_NEGATION:
             return avifSampleTransformClamp32b(-(int64_t)operand);
         case AVIF_SAMPLE_TRANSFORM_ABSOLUTE:
             return operand >= 0 ? operand : avifSampleTransformClamp32b(-(int64_t)operand);
         case AVIF_SAMPLE_TRANSFORM_NOT:
             return ~operand;
-        case AVIF_SAMPLE_TRANSFORM_MSB: {
+        case AVIF_SAMPLE_TRANSFORM_BSR: {
             if (operand <= 0) {
                 return 0;
             }
@@ -197,13 +227,13 @@ static int32_t avifSampleTransformOperation32bTwoOperands(int32_t leftOperand, i
 {
     switch (operator) {
         case AVIF_SAMPLE_TRANSFORM_SUM:
-            return avifSampleTransformClamp32b(leftOperand + rightOperand);
+            return avifSampleTransformClamp32b((int64_t)leftOperand + rightOperand);
         case AVIF_SAMPLE_TRANSFORM_DIFFERENCE:
-            return avifSampleTransformClamp32b(leftOperand - rightOperand);
+            return avifSampleTransformClamp32b((int64_t)leftOperand - rightOperand);
         case AVIF_SAMPLE_TRANSFORM_PRODUCT:
-            return avifSampleTransformClamp32b(leftOperand * rightOperand);
-        case AVIF_SAMPLE_TRANSFORM_DIVIDE:
-            return rightOperand == 0 ? leftOperand : leftOperand / rightOperand;
+            return avifSampleTransformClamp32b((int64_t)leftOperand * rightOperand);
+        case AVIF_SAMPLE_TRANSFORM_QUOTIENT:
+            return rightOperand == 0 ? leftOperand : avifSampleTransformClamp32b((int64_t)leftOperand / rightOperand);
         case AVIF_SAMPLE_TRANSFORM_AND:
             return leftOperand & rightOperand;
         case AVIF_SAMPLE_TRANSFORM_OR:
@@ -214,24 +244,24 @@ static int32_t avifSampleTransformOperation32bTwoOperands(int32_t leftOperand, i
             if (leftOperand == 0 || leftOperand == 1) {
                 return leftOperand;
             }
-            const uint32_t exponent = rightOperand > 0 ? (uint32_t)rightOperand : (uint32_t) - (int64_t)rightOperand;
-            if (exponent == 0) {
+            if (leftOperand == -1) {
+                return (rightOperand % 2 == 0) ? 1 : -1;
+            }
+            if (rightOperand == 0) {
                 return 1;
             }
-            if (exponent == 1) {
+            if (rightOperand == 1) {
                 return leftOperand;
             }
-            if (leftOperand == -1) {
-                return (exponent % 2 == 0) ? 1 : -1;
+            if (rightOperand < 0) {
+                // L^R is in ]-1:1[ here, so truncating it always gives 0.
+                return 0;
             }
-
             int64_t result = leftOperand;
-            for (uint32_t i = 1; i < exponent; ++i) {
+            for (int32_t i = 1; i < rightOperand; ++i) {
                 result *= leftOperand;
-                if (result <= INT32_MIN) {
-                    return INT32_MIN;
-                } else if (result >= INT32_MAX) {
-                    return INT32_MAX;
+                if (result < INT32_MIN || result > INT32_MAX) {
+                    return (leftOperand > 0 || rightOperand % 2 == 0) ? INT32_MAX : INT32_MIN;
                 }
             }
             return (int32_t)result;
@@ -284,11 +314,13 @@ static avifResult avifImageApplyExpression32b(avifImage * dstImage,
                         stack[stackSize++] = token->constant;
                     } else if (token->type == AVIF_SAMPLE_TRANSFORM_INPUT_IMAGE_ITEM_INDEX) {
                         const avifImage * image = inputImageItems[token->inputImageItemIndex - 1]; // 1-based
-                        const uint8_t * row = avifImagePlane(image, c) + avifImagePlaneRowBytes(image, c) * y;
+                        const uint8_t * row = avifImagePlane(image, c);
+                        AVIF_ASSERT_OR_RETURN(row != NULL);
+                        row += (size_t)avifImagePlaneRowBytes(image, c) * y;
                         AVIF_ASSERT_OR_RETURN(stackSize < stackCapacity);
                         stack[stackSize++] = avifImageUsesU16(image) ? ((const uint16_t *)row)[x] : row[x];
-                    } else if (token->type == AVIF_SAMPLE_TRANSFORM_NEGATE || token->type == AVIF_SAMPLE_TRANSFORM_ABSOLUTE ||
-                               token->type == AVIF_SAMPLE_TRANSFORM_NOT || token->type == AVIF_SAMPLE_TRANSFORM_MSB) {
+                    } else if (token->type == AVIF_SAMPLE_TRANSFORM_NEGATION || token->type == AVIF_SAMPLE_TRANSFORM_ABSOLUTE ||
+                               token->type == AVIF_SAMPLE_TRANSFORM_NOT || token->type == AVIF_SAMPLE_TRANSFORM_BSR) {
                         AVIF_ASSERT_OR_RETURN(stackSize >= 1);
                         stack[stackSize - 1] = avifSampleTransformOperation32bOneOperand(stack[stackSize - 1], token->type);
                         // Pop one and push one.
@@ -300,10 +332,13 @@ static avifResult avifImageApplyExpression32b(avifImage * dstImage,
                     }
                 }
                 AVIF_ASSERT_OR_RETURN(stackSize == 1);
-                // Fit to 'pixi'-defined range. TODO(yguyon): Take avifRange into account.
+                // Fit to the range defined by the PixelInformationProperty.
+                // The limited/full range is ignored, like in other libavif encoding and decoding paths.
                 stack[0] = AVIF_CLAMP(stack[0], minValue, maxValue);
 
-                uint8_t * row = avifImagePlane(dstImage, c) + avifImagePlaneRowBytes(dstImage, c) * y;
+                uint8_t * row = avifImagePlane(dstImage, c);
+                AVIF_ASSERT_OR_RETURN(row != NULL);
+                row += (size_t)avifImagePlaneRowBytes(dstImage, c) * y;
                 if (avifImageUsesU16(dstImage)) {
                     ((uint16_t *)row)[x] = (uint16_t)stack[0];
                 } else {

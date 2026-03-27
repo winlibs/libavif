@@ -16,30 +16,7 @@
 #
 # tests for command lines
 
-# Very verbose but useful for debugging.
-set -ex
-
-if [[ "$#" -ge 1 ]]; then
-  # eval so that the passed in directory can contain variables.
-  BINARY_DIR="$(eval echo "$1")"
-else
-  # Assume "tests" is the current directory.
-  BINARY_DIR="$(pwd)/.."
-fi
-if [[ "$#" -ge 2 ]]; then
-  TESTDATA_DIR="$(eval echo "$2")"
-else
-  TESTDATA_DIR="$(pwd)/data"
-fi
-if [[ "$#" -ge 3 ]]; then
-  TMP_DIR="$(eval echo "$3")"
-else
-  TMP_DIR="$(mktemp -d)"
-fi
-
-AVIFENC="${BINARY_DIR}/avifenc"
-AVIFDEC="${BINARY_DIR}/avifdec"
-ARE_IMAGES_EQUAL="${BINARY_DIR}/tests/are_images_equal"
+source $(dirname "$0")/cmd_test_common.sh || exit
 
 # Basic calls.
 "${AVIFENC}" --version
@@ -47,6 +24,7 @@ ARE_IMAGES_EQUAL="${BINARY_DIR}/tests/are_images_equal"
 
 # Input file paths.
 INPUT_Y4M="${TESTDATA_DIR}/kodim03_yuv420_8bpc.y4m"
+INPUT_PNG="${TESTDATA_DIR}/circle-trns-after-plte.png"
 INPUT_UTF8_Y4M="🐾.y4m"
 # Output file names.
 ENCODED_FILE="avif_test_cmd_encoded.avif"
@@ -60,7 +38,9 @@ OUT_MSG="avif_test_cmd_out_msg.txt"
 # Cleanup
 cleanup() {
   pushd ${TMP_DIR}
-    rm -f -- "${ENCODED_FILE}" "${ENCODED_FILE_WITH_DASH}" "${DECODED_FILE}" "${OUT_MSG}"
+    rm -f -- "${ENCODED_FILE}" "${ENCODED_UTF8_FILE}" "${ENCODED_FILE_REFERENCE}" \
+             "${ENCODED_FILE_WITH_DASH}" "${DECODED_FILE}" "${DECODED_UTF8_FILE}" \
+             "${OUT_MSG}"
   popd
 }
 trap cleanup EXIT
@@ -130,17 +110,34 @@ pushd ${TMP_DIR}
   # The default quality is 60. The default alpha quality is 100 (lossless).
   "${AVIFENC}" -s 10 "${INPUT_Y4M}" "${ENCODED_FILE}" > "${OUT_MSG}"
   grep " color quality \[60 " "${OUT_MSG}"
-  grep " alpha quality \[100 " "${OUT_MSG}"
+  grep " alpha quality \[60 " "${OUT_MSG}"
   "${AVIFENC}" -s 10 -q 85 "${INPUT_Y4M}" "${ENCODED_FILE}" > "${OUT_MSG}"
   grep " color quality \[85 " "${OUT_MSG}"
-  grep " alpha quality \[100 " "${OUT_MSG}"
+  grep " alpha quality \[85 " "${OUT_MSG}"
   # The average of 15 and 25 is 20. Quantizer 20 maps to quality 68.
   "${AVIFENC}" -s 10 --min 15 --max 25 "${INPUT_Y4M}" "${ENCODED_FILE}" > "${OUT_MSG}"
   grep " color quality \[68 " "${OUT_MSG}"
-  grep " alpha quality \[100 " "${OUT_MSG}"
+  grep " alpha quality \[68 " "${OUT_MSG}"
   "${AVIFENC}" -s 10 -q 65 --min 15 --max 25 "${INPUT_Y4M}" "${ENCODED_FILE}" > "${OUT_MSG}"
   grep " color quality \[65 " "${OUT_MSG}"
-  grep " alpha quality \[100 " "${OUT_MSG}"
+  grep " alpha quality \[65 " "${OUT_MSG}"
+
+  # Test tiling options.
+  echo "Testing tiling options"
+  "${AVIFENC}" -s 10 "${INPUT_Y4M}" "${ENCODED_FILE}" > "${OUT_MSG}"
+  grep " automatic tiling," "${OUT_MSG}"
+  "${AVIFENC}" -s 10 --tilerowslog2 1 "${INPUT_Y4M}" "${ENCODED_FILE}" > "${OUT_MSG}"
+  grep " tileRowsLog2 \[1\], tileColsLog2 \[0\]," "${OUT_MSG}"
+  "${AVIFENC}" -s 10 --tilecolslog2 2 "${INPUT_Y4M}" "${ENCODED_FILE}" > "${OUT_MSG}"
+  grep " tileRowsLog2 \[0\], tileColsLog2 \[2\]," "${OUT_MSG}"
+  "${AVIFENC}" -s 10 --tilerowslog2 1 --tilecolslog2 2 "${INPUT_Y4M}" "${ENCODED_FILE}" > "${OUT_MSG}"
+  grep " tileRowsLog2 \[1\], tileColsLog2 \[2\]," "${OUT_MSG}"
+  "${AVIFENC}" -s 10 --autotiling "${INPUT_Y4M}" "${ENCODED_FILE}" > "${OUT_MSG}"
+  grep " automatic tiling," "${OUT_MSG}"
+  # --autotiling and --tilerowslog2 R --tilecolslog2 C are mutually exclusive.
+  "${AVIFENC}" --autotiling --tilerowslog2 1 "${INPUT_Y4M}" "${ENCODED_FILE}" && exit 1
+  "${AVIFENC}" --autotiling --tilecolslog2 2 "${INPUT_Y4M}" "${ENCODED_FILE}" && exit 1
+  "${AVIFENC}" --autotiling --tilerowslog2 1 --tilecolslog2 2 "${INPUT_Y4M}" "${ENCODED_FILE}" && exit 1
 popd
 
 exit 0

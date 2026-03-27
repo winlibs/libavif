@@ -49,13 +49,21 @@ static avifBool rav1eSupports400(void)
     return minorVersion >= 4;
 }
 
+// rav1e's QP range is [0,255]
+static int rav1eQualityToQuantizer(int quality)
+{
+    const int quantizer = ((100 - quality) * 255 + 50) / 100;
+
+    return quantizer;
+}
+
 static avifResult rav1eCodecEncodeImage(avifCodec * codec,
                                         avifEncoder * encoder,
                                         const avifImage * image,
                                         avifBool alpha,
                                         int tileRowsLog2,
                                         int tileColsLog2,
-                                        int quantizer,
+                                        int quality,
                                         avifEncoderChanges encoderChanges,
                                         avifBool disableLaggedOutput,
                                         uint32_t addImageFlags,
@@ -91,11 +99,27 @@ static avifResult rav1eCodecEncodeImage(avifCodec * codec,
         const avifBool supports400 = rav1eSupports400();
         RaPixelRange rav1eRange;
         if (alpha) {
+            // AV1-AVIF specification, Section 4 "Auxiliary Image Items and Sequences":
+            //   The color_range field in the Sequence Header OBU shall be set to 1.
             rav1eRange = RA_PIXEL_RANGE_FULL;
+
+            // AV1-AVIF specification, Section 4 "Auxiliary Image Items and Sequences":
+            //   The mono_chrome field in the Sequence Header OBU shall be set to 1.
+            // Some encoders do not support 4:0:0 and encode alpha as 4:2:0 so it is not always respected.
             codec->internal->chromaSampling = supports400 ? RA_CHROMA_SAMPLING_CS400 : RA_CHROMA_SAMPLING_CS420;
             codec->internal->yShift = 1;
+
+            // CICP (CP/TC/MC) does not apply to the alpha auxiliary image.
+            // Use Unspecified (2) colour primaries, transfer characteristics, and matrix coefficients below.
         } else {
+            // AV1-ISOBMFF specification, Section 2.3.4:
+            //   The value of full_range_flag in the 'colr' box SHALL match the color_range
+            //   flag in the Sequence Header OBU.
             rav1eRange = (image->yuvRange == AVIF_RANGE_FULL) ? RA_PIXEL_RANGE_FULL : RA_PIXEL_RANGE_LIMITED;
+
+            // AV1-AVIF specification, Section 2.2.1. "AV1 Item Configuration Property":
+            //   The values of the fields in the AV1CodecConfigurationBox shall match those
+            //   of the Sequence Header OBU in the AV1 Image Item Data.
             codec->internal->yShift = 0;
             switch (image->yuvFormat) {
                 case AVIF_PIXEL_FORMAT_YUV444:
@@ -148,7 +172,7 @@ static avifResult rav1eCodecEncodeImage(avifCodec * codec,
             minQuantizer = AVIF_CLAMP(encoder->minQuantizerAlpha, 0, 63);
         }
         minQuantizer = (minQuantizer * 255) / 63; // Rescale quantizer values as rav1e's QP range is [0,255]
-        quantizer = (quantizer * 255) / 63;
+        const int quantizer = rav1eQualityToQuantizer(quality);
         if (rav1e_config_parse_int(rav1eConfig, "min_quantizer", minQuantizer) == -1) {
             goto cleanup;
         }
@@ -178,7 +202,7 @@ static avifResult rav1eCodecEncodeImage(avifCodec * codec,
             }
         }
         for (uint32_t i = 0; i < codec->csOptions->count; ++i) {
-            avifCodecSpecificOption * entry = &codec->csOptions->entries[i];
+            const avifCodecSpecificOption * entry = &codec->csOptions->entries[i];
             if (rav1e_config_parse(rav1eConfig, entry->key, entry->value) < 0) {
                 avifDiagnosticsPrintf(codec->diag, "Invalid value for %s: %s.", entry->key, entry->value);
                 result = AVIF_RESULT_INVALID_CODEC_SPECIFIC_OPTION;
@@ -186,6 +210,12 @@ static avifResult rav1eCodecEncodeImage(avifCodec * codec,
             }
         }
 
+        // AVIF specification, Section 2.2.1. "AV1 Item Configuration Property":
+        //   The values of the fields in the AV1CodecConfigurationBox shall match those
+        //   of the Sequence Header OBU in the AV1 Image Item Data.
+        // CICP values could be set to 2/2/2 (Unspecified) in the Sequence Header OBU for
+        // simplicity and to save 3 bytes, but some decoders ignore the colr box and rely
+        // on the OBU contents instead. See #2850.
         rav1e_config_set_color_description(rav1eConfig,
                                            (RaMatrixCoefficients)image->matrixCoefficients,
                                            (RaColorPrimaries)image->colorPrimaries,

@@ -16,7 +16,10 @@ function(avif_collect_deps target out_deps)
             set(in_special_block FALSE) # Latch off
         elseif(NOT in_special_block)
             string(REGEX REPLACE "\\\$<BUILD_INTERFACE:([^>]*)>" "\\1" dep ${dep})
-            string(REGEX REPLACE "\\\$<LINK_ONLY:([^>]*)>" "\\1" dep ${dep})
+            # dep could now be empty if dep was <BUILD_INTERFACE:> before the replace.
+            if(dep)
+                string(REGEX REPLACE "\\\$<LINK_ONLY:([^>]*)>" "\\1" dep ${dep})
+            endif()
             if(TARGET ${dep})
                 get_target_property(_aliased_dep ${dep} ALIASED_TARGET)
                 if(_aliased_dep)
@@ -51,6 +54,11 @@ function(merge_static_libs target in_target)
 
     set(source_file ${CMAKE_CURRENT_BINARY_DIR}/${target}_depends.c)
     add_library(${target} STATIC ${source_file})
+
+    get_target_property(include_dirs ${in_target} INTERFACE_INCLUDE_DIRECTORIES)
+    if(include_dirs)
+        target_include_directories(${target} PUBLIC ${include_dirs})
+    endif()
 
     avif_collect_deps(${in_target} lib_deps)
 

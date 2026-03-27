@@ -22,9 +22,12 @@ avifResult ChangeBase(const avifImage& image, int depth,
   swapped->depth = depth;
   swapped->yuvFormat = yuvFormat;
 
+  if (image.gainMap->alternateHdrHeadroom.d == 0) {
+    return AVIF_RESULT_INVALID_ARGUMENT;
+  }
   const float headroom =
-      static_cast<float>(image.gainMap->metadata.alternateHdrHeadroomN) /
-      image.gainMap->metadata.alternateHdrHeadroomD;
+      static_cast<float>(image.gainMap->alternateHdrHeadroom.n) /
+      image.gainMap->alternateHdrHeadroom.d;
   const bool tone_mapping_to_sdr = (headroom == 0.0f);
 
   swapped->colorPrimaries = image.gainMap->altColorPrimaries;
@@ -51,9 +54,10 @@ avifResult ChangeBase(const avifImage& image, int depth,
   }
 
   avifRGBImage swapped_rgb;
+  RGBImageCleanup rgb_cleanup(&swapped_rgb);
   avifRGBImageSetDefaults(&swapped_rgb, swapped);
 
-  avifContentLightLevelInformationBox clli = image.gainMap->image->clli;
+  avifContentLightLevelInformationBox clli = image.gainMap->altCLLI;
   const bool compute_clli =
       !tone_mapping_to_sdr && clli.maxCLL == 0 && clli.maxPALL == 0;
 
@@ -97,14 +101,12 @@ avifResult ChangeBase(const avifImage& image, int depth,
       (image.yuvFormat == AVIF_PIXEL_FORMAT_YUV400) ? 1 : 3;
   swapped->gainMap->altCLLI = image.clli;
 
-  // Swap base and alternate in the gain map metadata.
-  avifGainMapMetadata& metadata = swapped->gainMap->metadata;
-  metadata.useBaseColorSpace = !metadata.useBaseColorSpace;
-  std::swap(metadata.baseHdrHeadroomN, metadata.alternateHdrHeadroomN);
-  std::swap(metadata.baseHdrHeadroomD, metadata.alternateHdrHeadroomD);
+  // Swap base and alternate in the gain map
+  avifGainMap* gainMap = swapped->gainMap;
+  gainMap->useBaseColorSpace = !gainMap->useBaseColorSpace;
+  std::swap(gainMap->baseHdrHeadroom, gainMap->alternateHdrHeadroom);
   for (int c = 0; c < 3; ++c) {
-    std::swap(metadata.baseOffsetN, metadata.alternateOffsetN);
-    std::swap(metadata.baseOffsetD, metadata.alternateOffsetD);
+    std::swap(gainMap->baseOffset, gainMap->alternateOffset);
   }
 
   return AVIF_RESULT_OK;
@@ -113,9 +115,11 @@ avifResult ChangeBase(const avifImage& image, int depth,
 SwapBaseCommand::SwapBaseCommand()
     : ProgramCommand(
           "swapbase",
-          "Swaps the base and alternate images (e.g. if the base image is SDR "
-          "and the alternate is HDR, makes the base HDR). The alternate image "
-          "is the result ot fully applying the gain map.") {
+          "Swap the base and alternate images (e.g. if the base image is SDR "
+          "and the alternate is HDR, makes the base HDR)",
+          "The alternate image is the result of fully applying the gain map. "
+          "Images with ICC profiles are not supported: use --ignore-profile "
+          "and optionally set --cicp and/or --alt-cicp if needed.") {
   argparse_.add_argument(arg_input_filename_, "input_filename");
   argparse_.add_argument(arg_output_filename_, "output_filename");
   arg_image_read_.Init(argparse_);
@@ -123,26 +127,69 @@ SwapBaseCommand::SwapBaseCommand()
   argparse_.add_argument(arg_gain_map_quality_, "--qgain-map")
       .help("Quality for the gain map (0-100, where 100 is lossless)")
       .default_value("60");
+  argparse_.add_argument<CicpValues, CicpConverter>(arg_cicp_, "--cicp")
+      .help(
+          "Override the input image's CICP values, expressed as "
+          "P/T/M where P = color primaries, T = transfer characteristics, "
+          "M = matrix coefficients. This will become the CICP of the alternate "
+          "image after swapping.");
+  argparse_.add_argument<CicpValues, CicpConverter>(arg_alt_cicp_, "--alt-cicp")
+      .help(
+          "Override the CICP values for the alternate image in the input image,"
+          " expressed as P/T/M where P = color primaries, T = transfer "
+          "characteristics, M = matrix coefficients. This will become the CICP "
+          "of the base image after swapping.");
+  argparse_
+      .add_argument<avifContentLightLevelInformationBox, ClliConverter>(
+          arg_base_clli_, "--clli")
+      .help(
+          "Override the input image's content light level information, "
+          "expressed as:  MaxCLL,MaxPALL.");
+  argparse_
+      .add_argument<avifContentLightLevelInformationBox, ClliConverter>(
+          arg_alternate_clli_, "--alt-clli")
+      .help(
+          "Override content light level information for the alternate image "
+          "in the input image, expressed as:  MaxCLL,MaxPALL.");
 }
 
 avifResult SwapBaseCommand::Run() {
   DecoderPtr decoder(avifDecoderCreate());
-  if (decoder == NULL) {
+  if (decoder == nullptr) {
     return AVIF_RESULT_OUT_OF_MEMORY;
   }
-  decoder->enableParsingGainMapMetadata = true;
-  decoder->enableDecodingGainMap = true;
+  decoder->imageContentToDecode |= AVIF_IMAGE_CONTENT_GAIN_MAP;
   avifResult result = ReadAvif(decoder.get(), arg_input_filename_,
                                arg_image_read_.ignore_profile);
   if (result != AVIF_RESULT_OK) {
     return result;
   }
 
-  const avifImage* image = decoder->image;
+  avifImage* image = decoder->image;
   if (image->gainMap == nullptr || image->gainMap->image == nullptr) {
     std::cerr << "Input image " << arg_input_filename_
               << " does not contain a gain map\n";
     return AVIF_RESULT_INVALID_ARGUMENT;
+  }
+
+  if (arg_cicp_.provenance() == argparse::Provenance::SPECIFIED) {
+    image->colorPrimaries = arg_cicp_.value().color_primaries;
+    image->transferCharacteristics = arg_cicp_.value().transfer_characteristics;
+    image->matrixCoefficients = arg_cicp_.value().matrix_coefficients;
+  }
+  if (arg_alt_cicp_.provenance() == argparse::Provenance::SPECIFIED) {
+    image->gainMap->altColorPrimaries = arg_alt_cicp_.value().color_primaries;
+    image->gainMap->altTransferCharacteristics =
+        arg_alt_cicp_.value().transfer_characteristics;
+    image->gainMap->altMatrixCoefficients =
+        arg_alt_cicp_.value().matrix_coefficients;
+  }
+
+  if (arg_base_clli_.provenance() == argparse::Provenance::SPECIFIED) {
+    image->clli = arg_base_clli_.value();
+  }
+  if (arg_alternate_clli_.provenance() == argparse::Provenance::SPECIFIED) {
+    image->gainMap->altCLLI = arg_alternate_clli_.value();
   }
 
   int depth = arg_image_read_.depth;
@@ -179,7 +226,10 @@ avifResult SwapBaseCommand::Run() {
   encoder->qualityAlpha = arg_image_encode_.quality_alpha;
   encoder->qualityGainMap = arg_gain_map_quality_;
   encoder->speed = arg_image_encode_.speed;
-  result = WriteAvif(new_base.get(), encoder.get(), arg_output_filename_);
+  result =
+      WriteAvifGrid(new_base.get(), arg_image_encode_.grid.value().grid_cols,
+                    arg_image_encode_.grid.value().grid_rows, encoder.get(),
+                    arg_output_filename_);
   if (result != AVIF_RESULT_OK) {
     std::cout << "Failed to encode image: " << avifResultToString(result)
               << " (" << encoder->diag.error << ")\n";

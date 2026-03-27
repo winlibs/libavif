@@ -115,7 +115,9 @@ ImagePtr CreateImage(int width, int height, int depth,
 
 // Set all pixels of each plane of an image.
 void FillImagePlain(avifImage* image, const uint32_t yuva[4]);
-void FillImageGradient(avifImage* image);
+// 'offset' is a value to spatially offset the gradient, useful to create
+// distinct images.
+void FillImageGradient(avifImage* image, int offset = 0);
 void FillImageChannel(avifRGBImage* image, uint32_t channel_offset,
                       uint32_t value);
 
@@ -134,6 +136,10 @@ bool AreImagesEqual(const avifImage& image1, const avifImage& image2,
 
 // Returns true if both images have the same features and pixel values.
 bool AreImagesEqual(const avifRGBImage& image1, const avifRGBImage& image2);
+
+// Returns true if both images have the same features and close pixel values.
+bool AreImagesSimilar(const avifImage& image1, const avifImage& image2,
+                      double min_psnr = 30, bool ignore_alpha = false);
 
 // Returns the Peak Signal-to-Noise Ratio of image1 compared to image2.
 // A value of 99dB means all samples are exactly the same.
@@ -165,7 +171,6 @@ ImagePtr ReadImage(const char* folder_path, const char* file_name,
                        AVIF_CHROMA_DOWNSAMPLING_AUTOMATIC,
                    avifBool ignore_icc = false, avifBool ignore_exif = false,
                    avifBool ignore_xmp = false,
-                   avifBool allow_changing_cicp = true,
                    avifBool ignore_gain_map = false);
 // Convenient wrapper around avifPNGWrite() for debugging purposes.
 // Do not remove.

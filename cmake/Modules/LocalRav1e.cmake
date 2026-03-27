@@ -1,6 +1,6 @@
-set(AVIF_LOCAL_RAV1E_GIT_TAG v0.7.1)
-set(AVIF_LOCAL_CORROSION_GIT_TAG v0.5.0)
-set(AVIF_LOCAL_CARGOC_GIT_TAG v0.10.2)
+set(AVIF_RAV1E_GIT_TAG v0.8.1)
+set(AVIF_CORROSION_GIT_TAG v0.6.1)
+set(AVIF_CARGOC_GIT_TAG v0.10.20)
 
 set(RAV1E_LIB_FILENAME
     "${AVIF_SOURCE_DIR}/ext/rav1e/build.libavif/usr/lib/${AVIF_LIBRARY_PREFIX}rav1e${CMAKE_STATIC_LIBRARY_SUFFIX}"
@@ -25,8 +25,9 @@ else()
 
     FetchContent_Declare(
         Corrosion
+        EXCLUDE_FROM_ALL
         GIT_REPOSITORY https://github.com/corrosion-rs/corrosion.git
-        GIT_TAG ${AVIF_LOCAL_CORROSION_GIT_TAG}
+        GIT_TAG ${AVIF_CORROSION_GIT_TAG}
         GIT_SHALLOW ON
     )
 
@@ -38,7 +39,7 @@ else()
 
     FetchContent_MakeAvailable(Corrosion)
 
-    find_program(CARGO_CINSTALL cargo-cinstall HINTS "$ENV{HOME}/.cargo/bin")
+    find_program(CARGO_CINSTALL cargo-cinstall HINTS "$ENV{HOME}/.cargo/bin" HINTS ${CMAKE_BINARY_DIR})
 
     if(CARGO_CINSTALL)
         add_executable(cargo-cinstall IMPORTED GLOBAL)
@@ -48,8 +49,9 @@ else()
     if(NOT TARGET cargo-cinstall)
         FetchContent_Declare(
             cargoc
+            EXCLUDE_FROM_ALL
             GIT_REPOSITORY https://github.com/lu-zero/cargo-c.git
-            GIT_TAG "${AVIF_LOCAL_CARGOC_GIT_TAG}"
+            GIT_TAG "${AVIF_CARGOC_GIT_TAG}"
             GIT_SHALLOW ON
         )
         FetchContent_MakeAvailable(cargoc)
@@ -64,8 +66,9 @@ else()
 
     FetchContent_Declare(
         rav1e
+        EXCLUDE_FROM_ALL
         GIT_REPOSITORY https://github.com/xiph/rav1e.git
-        GIT_TAG "${AVIF_LOCAL_RAV1E_GIT_TAG}"
+        GIT_TAG "${AVIF_RAV1E_GIT_TAG}"
         GIT_SHALLOW ON
     )
     FetchContent_MakeAvailable(rav1e)
@@ -74,6 +77,11 @@ else()
         ${CMAKE_CURRENT_BINARY_DIR}/ext/rav1e/usr/lib/${CMAKE_STATIC_LIBRARY_PREFIX}rav1e${CMAKE_STATIC_LIBRARY_SUFFIX}
     )
     set(RAV1E_ENVVARS)
+    if(AVIF_OPTIMIZE_RAV1E_FOR_SIZE)
+        set(RAV1E_ENVVARS "CARGO_PROFILE_RELEASE_DEBUG=0" "CARGO_PROFILE_RELEASE_STRIP=true"
+                          "CARGO_PROFILE_PROFILE_RELEASE_OPT_LEVEL=\"s\"" "CARGO_PROFILE_RELEASE_INCREMENTAL=false"
+        )
+    endif()
     if(CMAKE_C_IMPLICIT_LINK_DIRECTORIES MATCHES "alpine-linux-musl")
         list(APPEND RAV1E_ENVVARS "RUSTFLAGS=-C link-args=-Wl,-z,stack-size=2097152 -C target-feature=-crt-static")
     endif()

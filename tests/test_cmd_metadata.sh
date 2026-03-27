@@ -16,33 +16,12 @@
 #
 # tests for command lines (metadata)
 
-# Very verbose but useful for debugging.
-set -ex
-
-if [[ "$#" -ge 1 ]]; then
-  # eval so that the passed in directory can contain variables.
-  BINARY_DIR="$(eval echo "$1")"
-else
-  # Assume "tests" is the current directory.
-  BINARY_DIR="$(pwd)/.."
-fi
-if [[ "$#" -ge 2 ]]; then
-  TESTDATA_DIR="$(eval echo "$2")"
-else
-  TESTDATA_DIR="$(pwd)/data"
-fi
-if [[ "$#" -ge 3 ]]; then
-  TMP_DIR="$(eval echo "$3")"
-else
-  TMP_DIR="$(mktemp -d)"
-fi
-
-AVIFENC="${BINARY_DIR}/avifenc"
-AVIFDEC="${BINARY_DIR}/avifdec"
+source $(dirname "$0")/cmd_test_common.sh || exit
 
 # Input file paths.
 INPUT_PNG="${TESTDATA_DIR}/paris_icc_exif_xmp.png"
 INPUT_JPG="${TESTDATA_DIR}/paris_exif_xmp_icc.jpg"
+INPUT_JPG_WEIRD_ICC="${TESTDATA_DIR}/paris_exif_xmp_modified_icc.jpg"
 INPUT_ICC="${TESTDATA_DIR}/sRGB2014.icc"
 # Output file names.
 ENCODED_FILE="avif_test_cmd_metadata_encoded.avif"
@@ -64,7 +43,7 @@ trap cleanup EXIT
 pushd ${TMP_DIR}
   # Metadata test.
   echo "Testing metadata enc"
-  for INPUT in "${INPUT_PNG}" "${INPUT_JPG}"; do
+  for INPUT in "${INPUT_PNG}" "${INPUT_JPG}" "${INPUT_JPG_WEIRD_ICC}"; do
     "${AVIFENC}" "${INPUT}" -o "${ENCODED_FILE}"
 
     # Ignoring a metadata chunk should produce a different output file.

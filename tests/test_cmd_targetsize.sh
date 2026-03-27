@@ -16,28 +16,7 @@
 #
 # tests for command lines (--target-size)
 
-set -ex
-
-if [[ "$#" -ge 1 ]]; then
-  # eval so that the passed in directory can contain variables.
-  BINARY_DIR="$(eval echo "$1")"
-else
-  # Assume "tests" is the current directory.
-  BINARY_DIR="$(pwd)/.."
-fi
-if [[ "$#" -ge 2 ]]; then
-  TESTDATA_DIR="$(eval echo "$2")"
-else
-  TESTDATA_DIR="$(pwd)/data"
-fi
-if [[ "$#" -ge 3 ]]; then
-  TMP_DIR="$(eval echo "$3")"
-else
-  TMP_DIR="$(mktemp -d)"
-fi
-
-AVIFENC="${BINARY_DIR}/avifenc"
-AVIFDEC="${BINARY_DIR}/avifdec"
+source $(dirname "$0")/cmd_test_common.sh || exit
 
 # Input file paths.
 INPUT_Y4M="${TESTDATA_DIR}/kodim03_yuv420_8bpc.y4m"
@@ -96,10 +75,9 @@ pushd ${TMP_DIR}
 
   # The remaining tests in this file use animations that may trigger segmentation faults
   # with libaom versions older than 3.6.0. Skip the tests if that is the case.
-  # TODO(yguyon): Investigate.
   # The grep and cut commands are not pretty but seem to work on most platforms.
   if "${AVIFENC}" -V | grep -o "aom" --quiet; then
-    AOM_VERSION=$("${AVIFENC}" -V | grep -o "aom.*[0-9]*\.")        # "aom [enc/dec]:X.Y."
+    AOM_VERSION=$("${AVIFENC}" -V | grep -o "aom[^,]*[0-9]*\.")     # "aom [enc/dec]:X.Y."
     AOM_VERSION=$(echo "${AOM_VERSION}" | cut -d ":" -f 2)          # "X.Y" maybe prepended by a 'v'
     AOM_VERSION=$(echo "${AOM_VERSION}" | grep -o "[0-9]*\.[0-9]*") # "X.Y"
     AOM_MAJOR_VERSION=$(echo "${AOM_VERSION}" | cut -d "." -f 1)

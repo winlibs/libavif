@@ -16,6 +16,7 @@
 
 #include "avif/avif.h"
 #include "avif/avif_cxx.h"
+#include "avif/internal.h"
 #include "avifpng.h"
 #include "avifutil.h"
 
@@ -145,7 +146,7 @@ void FillImagePlain(avifImage* image, const uint32_t yuva[4]) {
   }
 }
 
-void FillImageGradient(avifImage* image) {
+void FillImageGradient(avifImage* image, int offset) {
   for (avifChannelIndex c :
        {AVIF_CHAN_Y, AVIF_CHAN_U, AVIF_CHAN_V, AVIF_CHAN_A}) {
     const uint32_t limitedRangeMin =
@@ -158,16 +159,17 @@ void FillImageGradient(avifImage* image) {
     const uint32_t plane_height = avifImagePlaneHeight(image, c);
     uint8_t* row = avifImagePlane(image, c);
     const uint32_t row_bytes = avifImagePlaneRowBytes(image, c);
+    const uint32_t max_xy_sum = plane_width + plane_height - 2;
     for (uint32_t y = 0; y < plane_height; ++y) {
       for (uint32_t x = 0; x < plane_width; ++x) {
-        uint32_t value;
+        uint32_t value = (x + y + offset) % (max_xy_sum + 1);
         if (image->yuvRange == AVIF_RANGE_FULL || c == AVIF_CHAN_A) {
-          value = (x + y) * ((1u << image->depth) - 1u) /
-                  std::max(1u, plane_width + plane_height - 2);
+          value =
+              value * ((1u << image->depth) - 1u) / std::max(1u, max_xy_sum);
         } else {
-          value = limitedRangeMin +
-                  (x + y) * (limitedRangeMax - limitedRangeMin) /
-                      std::max(1u, plane_width + plane_height - 2);
+          value = limitedRangeMin + value *
+                                        (limitedRangeMax - limitedRangeMin) /
+                                        std::max(1u, max_xy_sum);
         }
         if (avifImageUsesU16(image)) {
           reinterpret_cast<uint16_t*>(row)[x] = static_cast<uint16_t>(value);
@@ -216,15 +218,87 @@ bool AreByteSequencesEqual(const avifRWData& data1, const avifRWData& data2) {
   return AreByteSequencesEqual(data1.data, data1.size, data2.data, data2.size);
 }
 
-// Returns true if image1 and image2 are identical.
-bool AreImagesEqual(const avifImage& image1, const avifImage& image2,
-                    bool ignore_alpha) {
+namespace {
+// Returns true if all properties of image1 are present in image2 and equal.
+bool MatchEachPropertyOfFirstImageInSecondImage(const avifImage& image1,
+                                                const avifImage& image2) {
+  for (size_t i = 0; i < image1.numProperties; ++i) {
+    const avifImageItemProperty& property1 = image1.properties[i];
+
+    // libavif may write a 'ccsp' box in Sample Entries.
+    // libavif does not read and expose those except in avifImage::properties.
+    // Ignore these boxes because it is an easy source of valid difference
+    // between an original avifImage and a decoded avifImage.
+    if (AreByteSequencesEqual(property1.boxtype, sizeof(property1.boxtype),
+                              reinterpret_cast<const uint8_t*>("ccst"), 4)) {
+      continue;
+    }
+
+    bool found = false;
+    for (size_t j = 0; j < image2.numProperties; ++j) {
+      const avifImageItemProperty& property2 = image2.properties[j];
+      if (!AreByteSequencesEqual(property1.boxtype, sizeof(property1.boxtype),
+                                 property2.boxtype,
+                                 sizeof(property2.boxtype))) {
+        continue;
+      }
+      if (AreByteSequencesEqual(property1.boxtype, sizeof(property1.boxtype),
+                                reinterpret_cast<const uint8_t*>("uuid"), 4) &&
+          !AreByteSequencesEqual(property1.usertype, sizeof(property1.usertype),
+                                 property2.usertype,
+                                 sizeof(property2.usertype))) {
+        continue;
+      }
+      if (found) return false;  // Consider duplicates as invalid.
+      found = true;
+      if (!AreByteSequencesEqual(property1.boxPayload, property2.boxPayload)) {
+        return false;
+      }
+    }
+    if (!found) return false;
+  }
+  return true;
+}
+
+// Returns true if image1 and image2 are identical, pixel values excepted.
+bool AreImageFeaturesEqual(const avifImage& image1, const avifImage& image2,
+                           bool ignore_alpha) {
   if (image1.width != image2.width || image1.height != image2.height ||
       image1.depth != image2.depth || image1.yuvFormat != image2.yuvFormat ||
       image1.yuvRange != image2.yuvRange) {
     return false;
   }
   assert(image1.width * image1.height > 0);
+
+  for (avifChannelIndex c :
+       {AVIF_CHAN_Y, AVIF_CHAN_U, AVIF_CHAN_V, AVIF_CHAN_A}) {
+    if (ignore_alpha && c == AVIF_CHAN_A) continue;
+    const uint8_t* row1 = avifImagePlane(&image1, c);
+    const uint8_t* row2 = avifImagePlane(&image2, c);
+    if (!row1 != !row2) {
+      // Maybe one image contains an opaque alpha channel while the other has no
+      // alpha channel, but the features should still be considered equal.
+      if (c == AVIF_CHAN_A && avifImageIsOpaque(&image1) &&
+          avifImageIsOpaque(&image2)) {
+        continue;
+      }
+      return false;
+    }
+    if (c == AVIF_CHAN_A && row1 != nullptr &&
+        image1.alphaPremultiplied != image2.alphaPremultiplied &&
+        !avifImageIsOpaque(&image1)) {
+      // Alpha premultiplication is ignored if alpha is opaque.
+      return false;
+    }
+  }
+
+  if (!AreByteSequencesEqual(image1.icc, image2.icc)) return false;
+
+  if (image1.colorPrimaries != image2.colorPrimaries ||
+      image1.transferCharacteristics != image2.transferCharacteristics ||
+      image1.matrixCoefficients != image2.matrixCoefficients) {
+    return false;
+  }
 
   if (image1.clli.maxCLL != image2.clli.maxCLL ||
       image1.clli.maxPALL != image2.clli.maxPALL) {
@@ -242,19 +316,41 @@ bool AreImagesEqual(const avifImage& image1, const avifImage& image2,
     return false;
   }
 
+  if (!AreByteSequencesEqual(image1.exif, image2.exif)) return false;
+  if (!AreByteSequencesEqual(image1.xmp, image2.xmp)) return false;
+
+  if (!MatchEachPropertyOfFirstImageInSecondImage(image1, image2) ||
+      !MatchEachPropertyOfFirstImageInSecondImage(image2, image1)) {
+    return false;
+  }
+
+  if (!image1.gainMap != !image2.gainMap) return false;
+  if (image1.gainMap != nullptr) {
+    if (!avifSameGainMapMetadata(image1.gainMap, image2.gainMap) ||
+        !avifSameGainMapAltMetadata(image1.gainMap, image2.gainMap)) {
+      return false;
+    }
+
+    if (!image1.gainMap->image != !image2.gainMap->image) return false;
+  }
+  return true;
+}
+}  // namespace
+
+// Returns true if image1 and image2 are identical.
+bool AreImagesEqual(const avifImage& image1, const avifImage& image2,
+                    bool ignore_alpha) {
+  if (!AreImageFeaturesEqual(image1, image2, ignore_alpha)) {
+    return false;
+  }
+
   for (avifChannelIndex c :
        {AVIF_CHAN_Y, AVIF_CHAN_U, AVIF_CHAN_V, AVIF_CHAN_A}) {
     if (ignore_alpha && c == AVIF_CHAN_A) continue;
     const uint8_t* row1 = avifImagePlane(&image1, c);
     const uint8_t* row2 = avifImagePlane(&image2, c);
-    if (!row1 != !row2) {
-      // Maybe one image contains an opaque alpha channel while the other has no
-      // alpha channel, but they should still be considered equal.
-      if (c == AVIF_CHAN_A && avifImageIsOpaque(&image1) &&
-          avifImageIsOpaque(&image2)) {
-        continue;
-      }
-      return false;
+    if (row1 == nullptr || row2 == nullptr) {
+      continue;  // Verified in AreImageFeaturesEqual().
     }
     const uint32_t row_bytes1 = avifImagePlaneRowBytes(&image1, c);
     const uint32_t row_bytes2 = avifImagePlaneRowBytes(&image2, c);
@@ -277,9 +373,31 @@ bool AreImagesEqual(const avifImage& image1, const avifImage& image2,
       row2 += row_bytes2;
     }
   }
-  return AreByteSequencesEqual(image1.icc, image2.icc) &&
-         AreByteSequencesEqual(image1.exif, image2.exif) &&
-         AreByteSequencesEqual(image1.xmp, image2.xmp);
+
+  if (image1.gainMap != nullptr && image1.gainMap->image != nullptr &&
+      image2.gainMap != nullptr && image2.gainMap->image != nullptr &&
+      !AreImagesEqual(*image1.gainMap->image, *image2.gainMap->image)) {
+    return false;
+  }
+  return true;
+}
+
+bool AreImagesSimilar(const avifImage& image1, const avifImage& image2,
+                      double min_psnr, bool ignore_alpha) {
+  if (!AreImageFeaturesEqual(image1, image2, ignore_alpha)) {
+    return false;
+  }
+
+  if (GetPsnr(image1, image2, ignore_alpha) < min_psnr) {
+    return true;
+  }
+
+  if (image1.gainMap != nullptr && image1.gainMap->image != nullptr &&
+      image2.gainMap != nullptr && image2.gainMap->image != nullptr &&
+      GetPsnr(*image1.gainMap->image, *image2.gainMap->image) < min_psnr) {
+    return false;
+  }
+  return true;
 }
 
 namespace {
@@ -476,14 +594,14 @@ ImagePtr ReadImage(const char* folder_path, const char* file_name,
                    avifPixelFormat requested_format, int requested_depth,
                    avifChromaDownsampling chroma_downsampling,
                    avifBool ignore_icc, avifBool ignore_exif,
-                   avifBool ignore_xmp, avifBool allow_changing_cicp,
-                   avifBool ignore_gain_map) {
+                   avifBool ignore_xmp, avifBool ignore_gain_map) {
   ImagePtr image(avifImageCreateEmpty());
   if (!image ||
       avifReadImage((std::string(folder_path) + file_name).c_str(),
+                    AVIF_APP_FILE_FORMAT_UNKNOWN /* guess format */,
                     requested_format, requested_depth, chroma_downsampling,
-                    ignore_icc, ignore_exif, ignore_xmp, allow_changing_cicp,
-                    ignore_gain_map, AVIF_DEFAULT_IMAGE_SIZE_LIMIT, image.get(),
+                    ignore_icc, ignore_exif, ignore_xmp, ignore_gain_map,
+                    AVIF_DEFAULT_IMAGE_SIZE_LIMIT, image.get(),
                     /*outDepth=*/nullptr, /*sourceTiming=*/nullptr,
                     /*frameIter=*/nullptr) == AVIF_APP_FILE_FORMAT_UNKNOWN) {
     return nullptr;
@@ -509,9 +627,7 @@ AvifRwData Encode(const avifImage* image, int speed, int quality) {
   encoder->speed = speed;
   encoder->quality = quality;
   encoder->qualityAlpha = quality;
-#if defined(AVIF_ENABLE_EXPERIMENTAL_GAIN_MAP)
   encoder->qualityGainMap = quality;
-#endif
   testutil::AvifRwData bytes;
   if (avifEncoderWrite(encoder.get(), image, &bytes) != AVIF_RESULT_OK) {
     return {};

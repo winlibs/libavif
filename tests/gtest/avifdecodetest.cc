@@ -33,12 +33,82 @@ TEST(AvifDecodeTest, ColorGridAlphaNoGrid) {
   EXPECT_GT(decoder->image->alphaRowBytes, 0u);
 }
 
+TEST(AvifDecodeTest, ImageContentToDecodeNone) {
+  if (!testutil::Av1DecoderAvailable()) {
+    GTEST_SKIP() << "AV1 Codec unavailable, skip test.";
+  }
+  for (const std::string file_name :
+       {"paris_icc_exif_xmp.avif", "draw_points_idat.avif",
+        "sofa_grid1x5_420.avif", "color_grid_alpha_nogrid.avif",
+        "seine_sdr_gainmap_srgb.avif", "draw_points_idat_progressive.avif",
+        "weld_sato_12B_8B_q0.avif"}) {
+    for (
+        avifImageContentTypeFlag image_content_to_decode : {
+            AVIF_IMAGE_CONTENT_NONE,
+            AVIF_IMAGE_CONTENT_SAMPLE_TRANSFORMS  // Equivalent to NONE without
+                                                  // AVIF_IMAGE_CONTENT_COLOR_AND_ALPHA.
+        }) {
+      SCOPED_TRACE(file_name);
+      DecoderPtr decoder(avifDecoderCreate());
+      ASSERT_NE(decoder, nullptr);
+      // Do not decode anything.
+      decoder->imageContentToDecode = image_content_to_decode;
+      ASSERT_EQ(
+          avifDecoderSetIOFile(decoder.get(),
+                               (std::string(data_path) + file_name).c_str()),
+          AVIF_RESULT_OK);
+      ASSERT_EQ(avifDecoderParse(decoder.get()), AVIF_RESULT_OK)
+          << decoder->diag.error;
+      EXPECT_EQ(decoder->imageSequenceTrackPresent, AVIF_FALSE);
+      EXPECT_EQ(avifDecoderNextImage(decoder.get()), AVIF_RESULT_NO_CONTENT);
+    }
+  }
+}
+
 TEST(AvifDecodeTest, ParseEmptyData) {
   DecoderPtr decoder(avifDecoderCreate());
   ASSERT_NE(decoder, nullptr);
   ASSERT_EQ(avifDecoderSetIOMemory(decoder.get(), nullptr, 0), AVIF_RESULT_OK);
   // No ftyp box was seen.
   ASSERT_EQ(avifDecoderParse(decoder.get()), AVIF_RESULT_INVALID_FTYP);
+}
+
+TEST(AvifDecodeTest, ImageContentToDecodeColorXorAlpha) {
+  DecoderPtr decoder(avifDecoderCreate());
+  ASSERT_NE(decoder, nullptr);
+  ASSERT_EQ(avifDecoderSetIOMemory(decoder.get(), nullptr, 0), AVIF_RESULT_OK);
+  decoder->imageContentToDecode = static_cast<avifImageContentTypeFlag>(1 << 0);
+  ASSERT_EQ(avifDecoderParse(decoder.get()), AVIF_RESULT_NOT_IMPLEMENTED);
+  decoder->imageContentToDecode = static_cast<avifImageContentTypeFlag>(1 << 1);
+  ASSERT_EQ(avifDecoderParse(decoder.get()), AVIF_RESULT_NOT_IMPLEMENTED);
+}
+
+TEST(AvifDecodeTest, Idat) {
+  if (!testutil::Av1DecoderAvailable()) {
+    GTEST_SKIP() << "AV1 Codec unavailable, skip test.";
+  }
+
+  const ImagePtr original = testutil::ReadImage(data_path, "draw_points.png");
+
+  for (const std::string file_name :
+       {"draw_points_idat.avif", "draw_points_idat_metasize0.avif",
+        "draw_points_idat_progressive.avif",
+        "draw_points_idat_progressive_metasize0.avif"}) {
+    SCOPED_TRACE(file_name);
+    DecoderPtr decoder(avifDecoderCreate());
+    ASSERT_NE(decoder, nullptr);
+    ASSERT_EQ(avifDecoderSetIOFile(
+                  decoder.get(), (std::string(data_path) + file_name).c_str()),
+              AVIF_RESULT_OK);
+    ASSERT_EQ(avifDecoderParse(decoder.get()), AVIF_RESULT_OK);
+    EXPECT_EQ(decoder->alphaPresent, AVIF_TRUE);
+    EXPECT_EQ(decoder->imageSequenceTrackPresent, AVIF_FALSE);
+    ASSERT_EQ(avifDecoderNextImage(decoder.get()), AVIF_RESULT_OK);
+    EXPECT_NE(decoder->image->alphaPlane, nullptr);
+    EXPECT_GT(decoder->image->alphaRowBytes, 0u);
+
+    EXPECT_EQ(testutil::GetPsnr(*original, *decoder->image), 99.0);
+  }
 }
 
 // From https://crbug.com/334281983.

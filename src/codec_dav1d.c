@@ -15,6 +15,7 @@
 #pragma clang diagnostic pop
 #endif
 
+#include <stdio.h>
 #include <string.h>
 
 // For those building with an older version of dav1d (not recommended).
@@ -37,6 +38,12 @@ static void avifDav1dFreeCallback(const uint8_t * buf, void * cookie)
     (void)cookie;
 }
 
+static void avifDav1dLogCallback(void * cookie, const char * format, va_list ap)
+{
+    avifCodec * codec = (avifCodec *)cookie;
+    vsnprintf(codec->diag->error, AVIF_DIAGNOSTICS_ERROR_BUFFER_SIZE, format, ap);
+}
+
 static void dav1dCodecDestroyInternal(avifCodec * codec)
 {
     if (codec->internal->hasPicture) {
@@ -49,7 +56,6 @@ static void dav1dCodecDestroyInternal(avifCodec * codec)
 }
 
 static avifBool dav1dCodecGetNextImage(struct avifCodec * codec,
-                                       struct avifDecoder * decoder,
                                        const avifDecodeSample * sample,
                                        avifBool alpha,
                                        avifBool * isLimitedRangeAlpha,
@@ -61,16 +67,18 @@ static avifBool dav1dCodecGetNextImage(struct avifCodec * codec,
         // Give all available threads to decode a single frame as fast as possible
 #if DAV1D_API_VERSION_MAJOR >= 6
         dav1dSettings.max_frame_delay = 1;
-        dav1dSettings.n_threads = AVIF_CLAMP(decoder->maxThreads, 1, DAV1D_MAX_THREADS);
+        dav1dSettings.n_threads = AVIF_CLAMP(codec->maxThreads, 1, DAV1D_MAX_THREADS);
 #else
         dav1dSettings.n_frame_threads = 1;
-        dav1dSettings.n_tile_threads = AVIF_CLAMP(decoder->maxThreads, 1, DAV1D_MAX_TILE_THREADS);
+        dav1dSettings.n_tile_threads = AVIF_CLAMP(codec->maxThreads, 1, DAV1D_MAX_TILE_THREADS);
 #endif // DAV1D_API_VERSION_MAJOR >= 6
         // Set a maximum frame size limit to avoid OOM'ing fuzzers. In 32-bit builds, if
         // frame_size_limit > 8192 * 8192, dav1d reduces frame_size_limit to 8192 * 8192 and logs
         // a message, so we set frame_size_limit to at most 8192 * 8192 to avoid the dav1d_log
         // message.
-        dav1dSettings.frame_size_limit = (sizeof(size_t) < 8) ? AVIF_MIN(decoder->imageSizeLimit, 8192 * 8192) : decoder->imageSizeLimit;
+        dav1dSettings.frame_size_limit = (sizeof(size_t) < 8) ? AVIF_MIN(codec->imageSizeLimit, 8192 * 8192) : codec->imageSizeLimit;
+        dav1dSettings.logger.cookie = codec;
+        dav1dSettings.logger.callback = avifDav1dLogCallback;
         dav1dSettings.operating_point = codec->operatingPoint;
         dav1dSettings.all_layers = codec->allLayers;
 

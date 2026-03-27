@@ -6,6 +6,9 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "avif/avif.h"
@@ -15,6 +18,24 @@
 #include "gtest/gtest.h"
 
 namespace avif {
+
+//------------------------------------------------------------------------------
+// Custom FuzzTest printer for libavif types. Needed to avoid compile-time
+// errors due to structs with C-style array fields.
+//
+// These should reside in the same namespace as the types they print to enable
+// Argument-Dependent Lookup (ADL).
+// See https://github.com/google/fuzztest/blob/main/doc/domains-reference.md.
+template <typename Sink, typename Ptr,
+          typename = std::enable_if_t<std::is_same_v<Ptr, ImagePtr> ||
+                                      std::is_same_v<Ptr, EncoderPtr> ||
+                                      std::is_same_v<Ptr, DecoderPtr>>>
+void FuzzTestPrintSourceCode(Sink& sink, const Ptr& ptr) {
+  // Stub to avoid compile error for structs with C-style array fields.
+  // Consider adding a useful source code representation here:
+  //   `absl::Format(&sink, ...);`
+}
+
 namespace testutil {
 
 //------------------------------------------------------------------------------
@@ -49,11 +70,8 @@ DecoderPtr CreateAvifDecoder(avifCodecChoice codec_choice, int max_threads,
                              uint32_t image_dimension_limit,
                              uint32_t image_count_limit,
                              avifStrictFlags strict_flags);
-#if defined(AVIF_ENABLE_EXPERIMENTAL_GAIN_MAP)
-DecoderPtr AddGainMapOptionsToDecoder(DecoderPtr decoder,
-                                      bool enable_parsing_gain_map_metadata,
-                                      bool enable_decoding_gain_map);
-#endif
+DecoderPtr AddGainMapOptionsToDecoder(
+    DecoderPtr decoder, avifImageContentTypeFlags image_content_to_decode);
 
 //------------------------------------------------------------------------------
 // Custom fuzztest generators.
@@ -169,6 +187,74 @@ inline auto ArbitraryAvifAnim() {
   return fuzztest::OneOf(ArbitraryAvifAnim8b(), ArbitraryAvifAnim16b());
 }
 
+// Generates two signed fractions where the first one is smaller than or equal
+// to the second one.
+inline auto ArbitraryMinMaxSignedFraction() {
+  return fuzztest::FlatMap(
+      [](int32_t max_n, uint32_t max_d) {
+        return fuzztest::Map(
+            [max_n, max_d](int32_t min_n) {
+              // For simplicity, use the same denominator for both fractions.
+              // This does not cover all possible fractions but makes it easy
+              // to guarantee that the first fraction is smaller.
+              return std::pair<avifSignedFraction, avifSignedFraction>(
+                  {min_n, max_d}, {max_n, max_d});
+            },
+            fuzztest::InRange<int32_t>(std::numeric_limits<int32_t>::min(),
+                                       max_n));
+      },
+      fuzztest::Arbitrary<int32_t>(), fuzztest::NonZero<uint32_t>());
+}
+
+ImagePtr AddGainMapToImage(
+    ImagePtr image, ImagePtr gain_map,
+    const std::pair<avifSignedFraction, avifSignedFraction>& gain_map_min_max0,
+    const std::pair<avifSignedFraction, avifSignedFraction>& gain_map_min_max1,
+    const std::pair<avifSignedFraction, avifSignedFraction>& gain_map_min_max2,
+    uint32_t gain_map_gamma_n0, uint32_t gain_map_gamma_n1,
+    uint32_t gain_map_gamma_n2, uint32_t gain_map_gamma_d0,
+    uint32_t gain_map_gamma_d1, uint32_t gain_map_gamma_d2,
+    int32_t base_offset_n0, int32_t base_offset_n1, int32_t base_offset_n2,
+    uint32_t base_offset_d0, uint32_t base_offset_d1, uint32_t base_offset_d2,
+    int32_t alternate_offset_n0, int32_t alternate_offset_n1,
+    int32_t alternate_offset_n2, uint32_t alternate_offset_d0,
+    uint32_t alternate_offset_d1, uint32_t alternate_offset_d2,
+    uint32_t base_hdr_headroom_n, uint32_t base_hdr_headroom_d,
+    uint32_t alternate_hdr_headroom_n, uint32_t alternate_hdr_headroom_d,
+    bool use_base_color_space);
+
+inline auto ArbitraryAvifImageWithGainMap() {
+  return fuzztest::Map(
+      AddGainMapToImage, ArbitraryAvifImage(),
+      /*gain_map=*/ArbitraryAvifImage(),
+      /*gain_map_min_max0=*/ArbitraryMinMaxSignedFraction(),
+      /*gain_map_min_max1=*/ArbitraryMinMaxSignedFraction(),
+      /*gain_map_min_max2=*/ArbitraryMinMaxSignedFraction(),
+      /*gain_map_gamma_n0=*/fuzztest::NonZero<uint32_t>(),
+      /*gain_map_gamma_n1=*/fuzztest::NonZero<uint32_t>(),
+      /*gain_map_gamma_n2=*/fuzztest::NonZero<uint32_t>(),
+      /*gain_map_gamma_d0=*/fuzztest::NonZero<uint32_t>(),
+      /*gain_map_gamma_d1=*/fuzztest::NonZero<uint32_t>(),
+      /*gain_map_gamma_d2=*/fuzztest::NonZero<uint32_t>(),
+      /*base_offset_n0=*/fuzztest::Arbitrary<int32_t>(),
+      /*base_offset_n1=*/fuzztest::Arbitrary<int32_t>(),
+      /*base_offset_n2=*/fuzztest::Arbitrary<int32_t>(),
+      /*base_offset_d0=*/fuzztest::NonZero<uint32_t>(),
+      /*base_offset_d1=*/fuzztest::NonZero<uint32_t>(),
+      /*base_offset_d2=*/fuzztest::NonZero<uint32_t>(),
+      /*alternate_offset_n0=*/fuzztest::Arbitrary<int32_t>(),
+      /*alternate_offset_n1=*/fuzztest::Arbitrary<int32_t>(),
+      /*alternate_offset_n2=*/fuzztest::Arbitrary<int32_t>(),
+      /*alternate_offset_d0=*/fuzztest::NonZero<uint32_t>(),
+      /*alternate_offset_d1=*/fuzztest::NonZero<uint32_t>(),
+      /*alternate_offset_d2=*/fuzztest::NonZero<uint32_t>(),
+      /*base_hdr_headroom_n=*/fuzztest::Arbitrary<uint32_t>(),
+      /*base_hdr_headroom_d=*/fuzztest::NonZero<uint32_t>(),
+      /*alternate_hdr_headroom_n=*/fuzztest::Arbitrary<uint32_t>(),
+      /*alternate_hdr_headroom_d=*/fuzztest::NonZero<uint32_t>(),
+      /*use_base_color_space=*/fuzztest::Arbitrary<bool>());
+}
+
 // Generator for an arbitrary EncoderPtr.
 inline auto ArbitraryAvifEncoder() {
   const auto codec_choice = fuzztest::ElementOf<avifCodecChoice>(
@@ -221,34 +307,34 @@ inline auto ArbitraryBaseAvifDecoder() {
            AVIF_STRICT_ALPHA_ISPE_REQUIRED}));
 }
 
-#if defined(AVIF_ENABLE_EXPERIMENTAL_GAIN_MAP)
 // Generator for an arbitrary DecoderPtr with base options and gain map
-// options fuzzed, with the exception of 'ignoreColorAndAlpha' (because it would
-// break most tests' assumptions).
+// options fuzzed.
 inline auto ArbitraryAvifDecoderWithGainMapOptions() {
+  // Always decode at least color+alpha, since most tests
+  // assume that if the file/buffer is successfully decoded.
   return fuzztest::Map(
       AddGainMapOptionsToDecoder, ArbitraryBaseAvifDecoder(),
-      /*enable_parsing_gain_map_metadata=*/fuzztest::Arbitrary<bool>(),
-      /*enable_decoding_gain_map=*/fuzztest::Arbitrary<bool>());
+      fuzztest::ElementOf<avifImageContentTypeFlags>(
+          {AVIF_IMAGE_CONTENT_COLOR_AND_ALPHA,
+           AVIF_IMAGE_CONTENT_COLOR_AND_ALPHA | AVIF_IMAGE_CONTENT_GAIN_MAP,
+           AVIF_IMAGE_CONTENT_COLOR_AND_ALPHA |
+               AVIF_IMAGE_CONTENT_SAMPLE_TRANSFORMS,
+           AVIF_IMAGE_CONTENT_COLOR_AND_ALPHA | AVIF_IMAGE_CONTENT_GAIN_MAP |
+               AVIF_IMAGE_CONTENT_SAMPLE_TRANSFORMS}));
 }
 
 // Generator for an arbitrary DecoderPtr.
 inline auto ArbitraryAvifDecoder() {
   return ArbitraryAvifDecoderWithGainMapOptions();
 }
-#else
-// Generator for an arbitrary DecoderPtr.
-inline auto ArbitraryAvifDecoder() { return ArbitraryBaseAvifDecoder(); }
-#endif  // AVIF_ENABLE_EXPERIMENTAL_GAIN_MAP
 
-//------------------------------------------------------------------------------
-// Environment setup
-
-// Sets the environment variable 'name' to the 'value' during the setup step.
-::testing::Environment* SetEnv(const char* name, const char* value);
-
-inline ::testing::Environment* SetStackLimitTo512x1024Bytes() {
-  return SetEnv("FUZZTEST_STACK_LIMIT", "524288");
+// Same as ArbitraryAvifDecoder() but imageContentToDecode can be set to
+// AVIF_IMAGE_CONTENT_NONE.
+inline auto ArbitraryAvifDecoderPossiblyNoContent() {
+  return fuzztest::Map(
+      AddGainMapOptionsToDecoder, ArbitraryBaseAvifDecoder(),
+      fuzztest::BitFlagCombinationOf<avifImageContentTypeFlags>(
+          {AVIF_IMAGE_CONTENT_COLOR_AND_ALPHA, AVIF_IMAGE_CONTENT_GAIN_MAP}));
 }
 
 //------------------------------------------------------------------------------

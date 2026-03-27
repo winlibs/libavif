@@ -5,6 +5,7 @@
 
 #include <assert.h>
 #include <math.h>
+#include <stdint.h>
 #include <string.h>
 
 float avifRoundf(float v)
@@ -89,6 +90,11 @@ avifBool avifArrayCreate(void * arrayStruct, uint32_t elementSize, uint32_t init
     arr->elementSize = elementSize ? elementSize : 1;
     arr->count = 0;
     arr->capacity = initialCapacity;
+    if (arr->capacity > SIZE_MAX / arr->elementSize) {
+        arr->ptr = NULL;
+        arr->capacity = 0;
+        return AVIF_FALSE;
+    }
     size_t byteCount = (size_t)arr->elementSize * arr->capacity;
     arr->ptr = (uint8_t *)avifAlloc(byteCount);
     if (!arr->ptr) {
@@ -105,10 +111,15 @@ void * avifArrayPush(void * arrayStruct)
     if (arr->count == arr->capacity) {
         uint8_t * oldPtr = arr->ptr;
         size_t oldByteCount = (size_t)arr->elementSize * arr->capacity;
-        arr->ptr = (uint8_t *)avifAlloc(oldByteCount * 2);
-        if (arr->ptr == NULL) {
+        if (oldByteCount > SIZE_MAX / 2 || arr->capacity > UINT32_MAX / 2) {
             return NULL;
         }
+        size_t newByteCount = oldByteCount * 2;
+        uint8_t * newPtr = (uint8_t *)avifAlloc(newByteCount);
+        if (newPtr == NULL) {
+            return NULL;
+        }
+        arr->ptr = newPtr;
         memset(arr->ptr + oldByteCount, 0, oldByteCount);
         memcpy(arr->ptr, oldPtr, oldByteCount);
         arr->capacity *= 2;
@@ -231,7 +242,7 @@ static avifBool avifDoubleToUnsignedFractionImpl(double v, uint32_t maxNumerator
     }
 
     // Maximum denominator: makes sure that the numerator is <= maxNumerator and the denominator is <= UINT32_MAX.
-    const uint64_t maxD = (v <= 1) ? UINT32_MAX : (uint64_t)floor(maxNumerator / v);
+    const uint32_t maxD = (v <= 1) ? UINT32_MAX : (uint32_t)floor(maxNumerator / v);
 
     // Find the best approximation of v as a fraction using continued fractions, see
     // https://en.wikipedia.org/wiki/Continued_fraction
@@ -252,7 +263,7 @@ static avifBool avifDoubleToUnsignedFractionImpl(double v, uint32_t maxNumerator
         }
         currentV = 1.0 / currentV;
         const double newD = previousD + floor(currentV) * (*denominator);
-        if (newD > maxD) {
+        if (newD > (double)maxD) {
             // This is the best we can do with a denominator <= max_d.
             return AVIF_TRUE;
         }
@@ -269,20 +280,20 @@ static avifBool avifDoubleToUnsignedFractionImpl(double v, uint32_t maxNumerator
     return AVIF_TRUE;
 }
 
-avifBool avifDoubleToSignedFraction(double v, int32_t * numerator, uint32_t * denominator)
+avifBool avifDoubleToSignedFraction(double v, avifSignedFraction * fraction)
 {
     uint32_t positive_numerator;
-    if (!avifDoubleToUnsignedFractionImpl(fabs(v), INT32_MAX, &positive_numerator, denominator)) {
+    if (!avifDoubleToUnsignedFractionImpl(fabs(v), INT32_MAX, &positive_numerator, &fraction->d)) {
         return AVIF_FALSE;
     }
-    *numerator = (int32_t)positive_numerator;
+    fraction->n = (int32_t)positive_numerator;
     if (v < 0) {
-        *numerator *= -1;
+        fraction->n *= -1;
     }
     return AVIF_TRUE;
 }
 
-avifBool avifDoubleToUnsignedFraction(double v, uint32_t * numerator, uint32_t * denominator)
+avifBool avifDoubleToUnsignedFraction(double v, avifUnsignedFraction * fraction)
 {
-    return avifDoubleToUnsignedFractionImpl(v, UINT32_MAX, numerator, denominator);
+    return avifDoubleToUnsignedFractionImpl(v, UINT32_MAX, &fraction->n, &fraction->d);
 }

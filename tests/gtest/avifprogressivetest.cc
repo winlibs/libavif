@@ -8,6 +8,9 @@
 namespace avif {
 namespace {
 
+// Used to pass the data folder path to the GoogleTest suites.
+const char* data_path = nullptr;
+
 class ProgressiveTest : public testing::Test {
  protected:
   static constexpr uint32_t kImageSize = 256;
@@ -30,9 +33,9 @@ class ProgressiveTest : public testing::Test {
     testutil::FillImageGradient(image_.get());
   }
 
-  void TestDecode(uint32_t expect_width, uint32_t expect_height) {
-    ASSERT_EQ(avifDecoderSetIOMemory(decoder_.get(), encoded_avif_.data,
-                                     encoded_avif_.size),
+  void TestDecode(uint8_t* data, size_t size, uint32_t expect_width,
+                  uint32_t expect_height) {
+    ASSERT_EQ(avifDecoderSetIOMemory(decoder_.get(), data, size),
               AVIF_RESULT_OK);
     ASSERT_EQ(avifDecoderParse(decoder_.get()), AVIF_RESULT_OK);
     ASSERT_EQ(decoder_->progressiveState, AVIF_PROGRESSIVE_STATE_ACTIVE);
@@ -46,6 +49,11 @@ class ProgressiveTest : public testing::Test {
       ASSERT_EQ(decoder_->image->height, expect_height);
       // TODO(wtc): Check avifDecoderNthImageMaxExtent().
     }
+  }
+
+  void TestDecode(uint32_t expect_width, uint32_t expect_height) {
+    TestDecode(encoded_avif_.data, encoded_avif_.size, expect_width,
+               expect_height);
 
     // TODO(wtc): Check decoder_->image and image_ are similar, and better
     // quality layer is more similar.
@@ -63,15 +71,44 @@ class ProgressiveTest : public testing::Test {
 
 TEST_F(ProgressiveTest, QualityChange) {
   encoder_->extraLayerCount = 1;
-  encoder_->minQuantizer = 50;
-  encoder_->maxQuantizer = 50;
+  encoder_->quality = 21;
 
   ASSERT_EQ(avifEncoderAddImage(encoder_.get(), image_.get(), 1,
                                 AVIF_ADD_IMAGE_FLAG_NONE),
             AVIF_RESULT_OK);
 
-  encoder_->minQuantizer = 0;
-  encoder_->maxQuantizer = 0;
+  encoder_->quality = 100;
+  ASSERT_EQ(avifEncoderAddImage(encoder_.get(), image_.get(), 1,
+                                AVIF_ADD_IMAGE_FLAG_NONE),
+            AVIF_RESULT_OK);
+
+  ASSERT_EQ(avifEncoderFinish(encoder_.get(), &encoded_avif_), AVIF_RESULT_OK);
+
+  TestDecode(kImageSize, kImageSize);
+}
+
+// NOTE: This test requires libaom v3.12.0 or later, as this was the first
+// version where tune IQ was available
+TEST_F(ProgressiveTest, TuneIq) {
+  encoder_->extraLayerCount = 1;
+  // Tune IQ requires all-intra mode, which libavif determines when the first
+  // layer is encoded at a very low quality (e.g. quality 10)
+  encoder_->quality = 10;
+  encoder_->codecChoice = AVIF_CODEC_CHOICE_AOM;
+
+  ASSERT_EQ(avifEncoderSetCodecSpecificOption(encoder_.get(), "tune", "iq"),
+            AVIF_RESULT_OK);
+  avifResult result = avifEncoderAddImage(encoder_.get(), image_.get(), 1,
+                                          AVIF_ADD_IMAGE_FLAG_NONE);
+
+  if (result == AVIF_RESULT_INVALID_CODEC_SPECIFIC_OPTION) {
+    // The aom version that libavif was built with likely does not support
+    // AOM_TUNE_IQ.
+    return;
+  }
+
+  ASSERT_EQ(result, AVIF_RESULT_OK);
+  encoder_->quality = 50;
   ASSERT_EQ(avifEncoderAddImage(encoder_.get(), image_.get(), 1,
                                 AVIF_ADD_IMAGE_FLAG_NONE),
             AVIF_RESULT_OK);
@@ -93,8 +130,7 @@ TEST_F(ProgressiveTest, DimensionChange) {
   }
 
   encoder_->extraLayerCount = 1;
-  encoder_->minQuantizer = 0;
-  encoder_->maxQuantizer = 0;
+  encoder_->quality = 100;
   encoder_->scalingMode = {{1, 2}, {1, 2}};
 
   ASSERT_EQ(avifEncoderAddImage(encoder_.get(), image_.get(), 1,
@@ -113,16 +149,14 @@ TEST_F(ProgressiveTest, DimensionChange) {
 
 TEST_F(ProgressiveTest, LayeredGrid) {
   encoder_->extraLayerCount = 1;
-  encoder_->minQuantizer = 50;
-  encoder_->maxQuantizer = 50;
+  encoder_->quality = 21;
 
   avifImage* image_grid[2] = {image_.get(), image_.get()};
   ASSERT_EQ(avifEncoderAddImageGrid(encoder_.get(), 2, 1, image_grid,
                                     AVIF_ADD_IMAGE_FLAG_NONE),
             AVIF_RESULT_OK);
 
-  encoder_->minQuantizer = 0;
-  encoder_->maxQuantizer = 0;
+  encoder_->quality = 100;
   ASSERT_EQ(avifEncoderAddImageGrid(encoder_.get(), 2, 1, image_grid,
                                     AVIF_ADD_IMAGE_FLAG_NONE),
             AVIF_RESULT_OK);
@@ -169,5 +203,50 @@ TEST_F(ProgressiveTest, TooFewLayers) {
             AVIF_RESULT_INVALID_ARGUMENT);
 }
 
+// Test progressive decoding with files that use 'idat' (inside the 'meta') box
+// instead of 'mdat' to store the image data. Note that for now (as of v1.1.1)
+// the decoder waits to have the full meta box available before parsing it, so
+// incremental decoding is not really possible and progressive decoding makes
+// little sense. But this checks that the files are still processed correctly.
+TEST(DecodeProgressiveTest, DecodeIdat) {
+  const ImagePtr original = testutil::ReadImage(data_path, "draw_points.png");
+
+  for (const std::string file_name :
+       {"draw_points_idat_progressive.avif",
+        "draw_points_idat_progressive_metasize0.avif"}) {
+    SCOPED_TRACE(file_name);
+    const int expected_layer_count = 2;
+
+    DecoderPtr decoder(avifDecoderCreate());
+    decoder->allowProgressive = true;
+    ASSERT_EQ(avifDecoderSetIOFile(
+                  decoder.get(), (std::string(data_path) + file_name).c_str()),
+              AVIF_RESULT_OK);
+    ASSERT_EQ(avifDecoderParse(decoder.get()), AVIF_RESULT_OK);
+    ASSERT_EQ(decoder->progressiveState, AVIF_PROGRESSIVE_STATE_ACTIVE);
+    ASSERT_EQ(static_cast<uint32_t>(decoder->imageCount), expected_layer_count);
+
+    for (uint32_t layer = 0; layer < expected_layer_count; ++layer) {
+      ASSERT_EQ(avifDecoderNextImage(decoder.get()), AVIF_RESULT_OK);
+      ASSERT_EQ(decoder->image->width, original->width);
+      ASSERT_EQ(decoder->image->height, original->height);
+    }
+    ASSERT_EQ(avifDecoderNextImage(decoder.get()),
+              AVIF_RESULT_NO_IMAGES_REMAINING);
+  }
+}
+
 }  // namespace
 }  // namespace avif
+
+int main(int argc, char** argv) {
+  ::testing::InitGoogleTest(&argc, argv);
+  if (argc != 2) {
+    std::cerr << "There must be exactly one argument containing the path to "
+                 "the test data folder"
+              << std::endl;
+    return 1;
+  }
+  avif::data_path = argv[1];
+  return RUN_ALL_TESTS();
+}
